@@ -202,6 +202,8 @@ gigaam-gui.desktop
 # Syncthing conflict copies
 *.sync-conflict-*
 # Tooling backup/scratch dirs
+.worktrees/
+AGENTS.local.md
 .deploy-backups/
 .opencode-backups/
 .omo/
