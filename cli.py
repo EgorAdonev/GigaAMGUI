@@ -59,6 +59,7 @@ from src.config import (
     DIARIZATION_BACKEND,
     ONNX_PROVIDER,
     OUTPUT_FORMATS,
+    STATS_FILE,
 )
 from src.core.asr.models import ASR_MODELS
 from src.core.model_loader import ModelLoader
@@ -75,6 +76,11 @@ apply_pyannote_patch()
 
 # Инициализация
 console = Console()
+
+
+def _create_stats_manager() -> ProcessingStats:
+    """Создать CLI-статистику в настроенном writable-каталоге."""
+    return ProcessingStats(STATS_FILE)
 
 # Стиль для questionary
 custom_style = Style([
@@ -589,7 +595,7 @@ def main(
     logger.success("Модель успешно загружена")
 
     # Менеджер статистики
-    stats_manager = ProcessingStats()
+    stats_manager = _create_stats_manager()
 
     # Подтверждение перед обработкой
     if interactive:
