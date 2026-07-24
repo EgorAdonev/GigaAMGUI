@@ -45,6 +45,15 @@ def _mark_installed(variant: str) -> None:
     (path / ".installed_ok").write_text("ok", encoding="utf-8")
 
 
+def test_hf_cache_dir_prefers_explicit_hf_home_over_runtime_dir(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "read-only-runtime"
+    hf_home = tmp_path / "writable-huggingface"
+    monkeypatch.setenv("GIGAAM_RUNTIME_DIR", str(runtime_dir))
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+
+    assert rm.hf_cache_dir() == hf_home
+
+
 def test_switch_runtime_purges_old_modules_and_activates_new(monkeypatch, tmp_path):
     monkeypatch.setenv("GIGAAM_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(rm, "VARIANTS", dict(_TEST_VARIANTS))

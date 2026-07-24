@@ -149,6 +149,9 @@ def base_dir() -> Path:
 
 def hf_cache_dir() -> Path:
     """Папка кэша моделей HuggingFace внутри общего кэша приложения."""
+    override = os.environ.get("HF_HOME")
+    if override:
+        return Path(os.path.expanduser(override))
     return base_dir() / "hf"
 
 
