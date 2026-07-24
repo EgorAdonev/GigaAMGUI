@@ -162,6 +162,42 @@ WEB_USERNAME=admin
 WEB_PASSWORD=replace_with_strong_password
 ```
 
+### Deploying the Web UI with Docker
+
+```bash
+cp .env.example .env
+mkdir -p uploads results logs cache
+docker compose up -d --build gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Compose mounts the host-side `GIGAAM_DATA_DIR` at `/data` inside the container.
+Do not put host absolute paths into `HF_HOME`, `TORCH_HOME`, `NEMO_HOME`,
+`ONNX_MODEL_DIR`, or `GIGAAM_RUNTIME_DIR`: container caches must remain below
+`/data`. The container root filesystem is read-only, so moving caches back under
+`/home` will break VAD or diarization-model downloads.
+
+When upgrading, rebuild the container but preserve `GIGAAM_DATA_DIR`, `uploads`,
+`results`, and `logs`. Models and user files live in those mounts, and the new
+container reuses them automatically; they do not need to be copied into a backup
+of the container itself. If root created the bind-mount directories, grant UID
+`1000` write access before starting the service.
+
+After an upgrade, check the health endpoint and logs in addition to container
+status:
+
+```bash
+docker compose ps gigaam-web
+docker compose logs --tail=200 gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+For diarization workloads, also confirm that the log contains neither `Read-only
+file system` nor `VAD unavailable`, and that ASR segmentation uses VAD instead of
+the emergency `overlap_chunks` fallback. You can retain a tag for the previous
+image before upgrading for a quick rollback. Configure nginx or another reverse
+proxy to the container at `127.0.0.1:8001` separately.
+
 For RTX 50xx / Blackwell, install a compatible PyTorch build first:
 
 ```bash

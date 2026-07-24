@@ -161,6 +161,42 @@ WEB_USERNAME=admin
 WEB_PASSWORD=replace_with_strong_password
 ```
 
+### Развёртывание Web UI через Docker
+
+```bash
+cp .env.example .env
+mkdir -p uploads results logs cache
+docker compose up -d --build gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Compose монтирует выбранный на хосте `GIGAAM_DATA_DIR` внутрь контейнера как
+`/data`. Не подставляйте хостовый абсолютный путь в `HF_HOME`, `TORCH_HOME`,
+`NEMO_HOME`, `ONNX_MODEL_DIR` или `GIGAAM_RUNTIME_DIR`: внутри контейнера эти
+кэши должны оставаться под `/data`. Корневая файловая система контейнера
+работает в режиме read-only, поэтому перенос кэшей обратно в `/home` приведёт к
+ошибке загрузки VAD или модели диаризации.
+
+При обновлении пересобирайте контейнер, но сохраняйте `GIGAAM_DATA_DIR`,
+`uploads`, `results` и `logs`: модели и пользовательские файлы находятся в этих
+томах и новый контейнер подхватит их автоматически. Не нужно копировать их внутрь
+резервной копии самого контейнера. Если каталоги bind mount создавались от root,
+дайте UID `1000` права записи до запуска сервиса.
+
+После обновления проверяйте не только статус контейнера, но и `/health` и журнал:
+
+```bash
+docker compose ps gigaam-web
+docker compose logs --tail=200 gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Для задач с диаризацией дополнительно убедитесь, что в логе нет `Read-only file
+system` или `VAD недоступен`, а сегментация ASR работает в режиме VAD, а не через
+аварийный `overlap_chunks` fallback. Перед обновлением можно сохранить тег
+предыдущего образа для быстрого rollback; nginx или другой reverse proxy к
+контейнеру на `127.0.0.1:8001` настраивается отдельно.
+
 Для RTX 50xx / Blackwell сначала установите совместимый PyTorch:
 
 ```bash
