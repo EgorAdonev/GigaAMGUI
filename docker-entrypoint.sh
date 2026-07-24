@@ -42,7 +42,9 @@ if [ "$(id -u)" = "0" ]; then
         "$GIGAAM_DEEPFILTER_DIR" \
         "$HOME" \
         "$XDG_CACHE_HOME"
-    exec gosu gigaam "$@"
+    # gosu may replace HOME with the value from /etc/passwd. Pass it again
+    # after switching users so libraries never fall back to read-only /home.
+    exec gosu gigaam env HOME="$HOME" "$@"
 fi
 
 exec "$@"

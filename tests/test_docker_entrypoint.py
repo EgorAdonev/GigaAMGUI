@@ -35,7 +35,10 @@ def _run_entrypoint(tmp_path: Path, *, extra_env: dict[str, str] | None = None):
         fake_bin / "chown",
         "#!/bin/sh\nprintf 'chown:%s\\n' \"$*\" >>\"$CALL_LOG\"\n",
     )
-    _write_executable(fake_bin / "gosu", "#!/bin/sh\nshift\nexec \"$@\"\n")
+    _write_executable(
+        fake_bin / "gosu",
+        "#!/bin/sh\nshift\nexport HOME=/home/gigaam\nexec \"$@\"\n",
+    )
 
     data_root = tmp_path / "persistent data"
     env = os.environ.copy()
@@ -78,6 +81,7 @@ def test_entrypoint_exports_writable_data_layout_before_command(tmp_path):
     assert exported["NEMO_HOME"] == str(data_root / "models" / "nemo")
     assert exported["ONNX_MODEL_DIR"] == str(data_root / "models" / "onnx")
     assert exported["GIGAAM_DEEPFILTER_DIR"] == str(data_root / "models" / "deepfilter")
+    assert exported["HOME"] == str(data_root / "runtime-home")
     assert str(data_root / "models" / "huggingface") in calls
     assert "/tmp/cache" in calls
 
