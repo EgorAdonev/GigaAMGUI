@@ -146,6 +146,7 @@ def _split_long_words(words: list[dict], width: int) -> list[dict]:
                 "text": text[offset:chunk_end],
                 "start": start + duration * offset / text_length,
                 "end": start + duration * chunk_end / text_length,
+                "joins_previous": offset > 0,
             })
     return split_words
 
@@ -258,7 +259,10 @@ def _wrap_words(words: list[dict], width: int) -> tuple[str, ...]:
         text = str(word["text"]).strip()
         if not text:
             continue
-        candidate = f"{current} {text}".strip()
+        # Продолжение разрезанного слова приклеивается без пробела: пробел внутри
+        # слова меняет границы слов для потребителей субтитров.
+        joins_previous = bool(word.get("joins_previous")) and bool(current)
+        candidate = f"{current}{text}" if joins_previous else f"{current} {text}".strip()
         if current and len(candidate) > width:
             lines.append(current)
             current = text

@@ -389,3 +389,36 @@ def test_labeled_cue_lines_fit_budget_when_group_continues():
     budget = options.max_line_width - len(cues[0].speaker_label) - 2
     for line in cues[0].lines:
         assert len(line) <= budget
+
+
+def test_split_word_chunks_rejoin_without_space():
+    # На узкой ширине суженный (под метку) split_width может не совпадать с
+    # финальной шириной wrap после того, как метка "потрачена" на первый cue.
+    # Ранее это приводило к тому, что два соседних чанка одного разрезанного
+    # слова оказывались в одной строке и склеивались через пробел.
+    long_word = "восемнадцатилетний"
+    assert len(long_word) == 18
+    utterances = [
+        {
+            "transcription": "Раз.",
+            "boundaries": (0.0, 0.5),
+            "speaker": "Спикер №1",
+            "words": [{"text": "Раз.", "start": 0.0, "end": 0.5}],
+        },
+        {
+            "transcription": f"{long_word} юбилей.",
+            "boundaries": (0.6, 2.5),
+            "speaker": "Спикер №1",
+            "words": [
+                {"text": long_word, "start": 0.6, "end": 1.8},
+                {"text": "юбилей.", "start": 1.9, "end": 2.5},
+            ],
+        },
+    ]
+    options = SubtitleOptions(max_line_count=2, max_line_width=20)
+
+    cues = build_subtitle_cues(utterances, options)
+
+    all_lines = [line for cue in cues for line in cue.lines]
+    assert not any("восемнадцатилетн ий" in line for line in all_lines)
+    assert any(long_word in line for line in all_lines)
