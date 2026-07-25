@@ -234,7 +234,6 @@ def build_subtitle_cues(
         if can_join:
             gap = float(words[0]["start"]) - float(grouped_words[-1]["end"])
             can_join = 0.0 <= gap <= _MAX_JOIN_GAP_SECONDS
-        starts_labeled_group = False
         if not can_join:
             flush_group()
             grouped_speaker = speaker
@@ -242,11 +241,9 @@ def build_subtitle_cues(
             if speaker is not None and speaker != labeled_speaker:
                 grouped_label = _fit_speaker(speaker, options.max_line_width)
                 labeled_speaker = speaker
-                starts_labeled_group = grouped_label is not None
-        split_width = _content_line_width(
-            options.max_line_width,
-            grouped_label if starts_labeled_group else None,
-        )
+        # Пока метка не напечатана, любое слово группы может попасть в cue
+        # с меткой, поэтому делим по суженной ширине всю группу целиком.
+        split_width = _content_line_width(options.max_line_width, grouped_label)
         grouped_words.extend(_split_long_words(words, split_width))
 
     flush_group()

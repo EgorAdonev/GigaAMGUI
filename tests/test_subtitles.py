@@ -360,3 +360,32 @@ def test_cues_without_speaker_have_no_label():
     cues = build_subtitle_cues(utterances, SubtitleOptions())
 
     assert [(cue.speaker, cue.speaker_label) for cue in cues] == [(None, None)]
+
+
+def test_labeled_cue_lines_fit_budget_when_group_continues():
+    # Продолжение группы (тот же спикер, пауза <= _MAX_JOIN_GAP_SECONDS) должно
+    # делиться по суженной ширине, пока метка ещё не напечатана, иначе длинное
+    # слово из продолжения может попасть в cue с меткой и превысить бюджет.
+    long_word = "abcdefghijklmnopqrstuvwxyz012345678ab."
+    utterances = [
+        {
+            "transcription": "Слово",
+            "boundaries": (0.0, 0.5),
+            "speaker": "S1",
+            "words": [{"text": "Слово", "start": 0.0, "end": 0.5}],
+        },
+        {
+            "transcription": long_word,
+            "boundaries": (0.6, 2.0),
+            "speaker": "S1",
+            "words": [{"text": long_word, "start": 0.6, "end": 2.0}],
+        },
+    ]
+    options = SubtitleOptions(max_line_count=2, max_line_width=40)
+
+    cues = build_subtitle_cues(utterances, options)
+
+    assert cues[0].speaker_label == "S1"
+    budget = options.max_line_width - len(cues[0].speaker_label) - 2
+    for line in cues[0].lines:
+        assert len(line) <= budget
