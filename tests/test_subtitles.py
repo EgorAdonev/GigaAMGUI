@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.subtitles import SubtitleOptions, build_subtitle_cues
+from src.core.subtitles import SRT_SPEAKER_SEPARATOR, SubtitleOptions, build_subtitle_cues
 
 
 def test_build_subtitle_cues_splits_sentences_using_word_timestamps():
@@ -386,7 +386,7 @@ def test_labeled_cue_lines_fit_budget_when_group_continues():
     cues = build_subtitle_cues(utterances, options)
 
     assert cues[0].speaker_label == "S1"
-    budget = options.max_line_width - len(cues[0].speaker_label) - 2
+    budget = options.max_line_width - len(cues[0].speaker_label) - len(SRT_SPEAKER_SEPARATOR)
     for line in cues[0].lines:
         assert len(line) <= budget
 
@@ -422,3 +422,92 @@ def test_split_word_chunks_rejoin_without_space():
     all_lines = [line for cue in cues for line in cue.lines]
     assert not any("восемнадцатилетн ий" in line for line in all_lines)
     assert any(long_word in line for line in all_lines)
+
+
+def test_speakerless_group_does_not_reset_labeled_speaker():
+    # Промежуточная группа без спикера не должна сбрасывать last-labeled
+    # speaker: как generate_markdown, так и diarized TXT-путь продвигают
+    # current_speaker только для truthy speaker.
+    utterances = [
+        {
+            "transcription": "Первое.",
+            "boundaries": (0.0, 0.5),
+            "speaker": "Спикер №1",
+            "words": [{"text": "Первое.", "start": 0.0, "end": 0.5}],
+        },
+        {
+            "transcription": "Без спикера.",
+            "boundaries": (0.6, 1.1),
+            "words": [
+                {"text": "Без", "start": 0.6, "end": 0.8},
+                {"text": "спикера.", "start": 0.9, "end": 1.1},
+            ],
+        },
+        {
+            "transcription": "Снова.",
+            "boundaries": (1.2, 1.7),
+            "speaker": "Спикер №1",
+            "words": [{"text": "Снова.", "start": 1.2, "end": 1.7}],
+        },
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert [cue.speaker_label for cue in cues] == ["Спикер №1", None, None]
+
+
+def test_label_on_first_cue_without_sentence_split():
+    # sentence_split=False достижим через --no-subtitle-sentence-split и TUI
+    # /subtitle-split off: метка всё равно должна печататься только на первом
+    # cue реплики, а не на каждом cue, порождённом переносом по ширине.
+    tokens = [
+        "первое", "второе", "третье", "четвертое", "пятое",
+        "шестое", "седьмое", "восьмое", "девятое.",
+    ]
+    utterance = {
+        "transcription": " ".join(tokens),
+        "boundaries": (10.0, 19.0),
+        "speaker": "Спикер №1",
+        "words": [
+            {"text": token, "start": 10.0 + index, "end": 10.8 + index}
+            for index, token in enumerate(tokens)
+        ],
+    }
+    options = SubtitleOptions(sentence_split=False, max_line_count=2, max_line_width=20)
+
+    cues = build_subtitle_cues([utterance], options)
+
+    assert len(cues) > 1
+    assert cues[0].speaker_label is not None
+    assert all(cue.speaker_label is None for cue in cues[1:])
+    budget = options.max_line_width - len(cues[0].speaker_label) - len(SRT_SPEAKER_SEPARATOR)
+    assert all(len(line) <= budget for line in cues[0].lines)
+
+
+def test_blank_speaker_groups_with_speakerless_utterances():
+    # Планировщик приводит "" к None; это пиновка того, что пустой speaker
+    # группируется с соседней repликой без speaker вовсе (baseline этого не
+    # делал).
+    utterances = [
+        {
+            "transcription": "Без спикера",
+            "boundaries": (0.0, 0.5),
+            "words": [
+                {"text": "Без", "start": 0.0, "end": 0.2},
+                {"text": "спикера", "start": 0.3, "end": 0.5},
+            ],
+        },
+        {
+            "transcription": "продолжение.",
+            "boundaries": (0.6, 1.1),
+            "speaker": "",
+            "words": [{"text": "продолжение.", "start": 0.6, "end": 1.1}],
+        },
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert len(cues) == 1
+    assert cues[0].speaker is None
+    assert cues[0].speaker_label is None
+    assert " ".join(cues[0].lines) == "Без спикера продолжение."

@@ -154,6 +154,8 @@ def _split_long_words(words: list[dict], width: int) -> list[dict]:
 def _fit_speaker(speaker: object, width: int) -> str | None:
     """Обрезать имя спикера под видимую SRT-метку, сохранив место для текста."""
 
+    # Единственный вызывающий код гарантирует speaker is not None и непустую
+    # строку; guard остаётся на случай, если _fit_speaker станет использоваться иначе.
     if speaker is None:
         return None
     value = str(speaker).strip()
@@ -216,7 +218,6 @@ def build_subtitle_cues(
                 grouped_label,
                 options,
             ))
-            grouped_label = None
         grouped_words = []
 
     for utterance in utterances:

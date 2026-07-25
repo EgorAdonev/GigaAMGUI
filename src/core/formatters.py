@@ -19,7 +19,14 @@ def format_timestamp(seconds: float, ms_sep: str) -> str:
 
 
 def generate_srt(utterances: list, options: SubtitleOptions | None = None) -> str:
-    """Генерирует контент в формате SRT субтитров."""
+    """Генерирует контент в формате SRT субтитров.
+
+    Метка спикера печатается только на первом cue реплики: SRT не переносит
+    состояние между блоками, но читатель видит их последовательно, как в TXT/MD.
+    Формат метки — обычный текст `Имя: `, без угловых скобок: `<Имя>` не является
+    тегом SRT, ffmpeg показывает его буквально, а парсеры, режущие `<...>`,
+    удаляют метку целиком. Долгая пауза того же спикера метку не повторяет.
+    """
     lines = []
 
     for index, cue in enumerate(build_subtitle_cues(utterances, options), start=1):
