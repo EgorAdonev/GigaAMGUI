@@ -6,8 +6,11 @@ import math
 from dataclasses import dataclass
 
 _MAX_JOIN_GAP_SECONDS = 1.0
-_VTT_SPEAKER_MARKUP_OVERHEAD = len("<v >")
 _PREFERRED_MIN_TEXT_WIDTH_WITH_SPEAKER = 16
+
+# Видимый разделитель метки спикера в SRT. VTT использует невидимую разметку
+# <v ...>, поэтому она не участвует в бюджете ширины строки.
+SRT_SPEAKER_SEPARATOR = ": "
 
 
 @dataclass(frozen=True)
@@ -33,12 +36,18 @@ class SubtitleOptions:
 
 @dataclass(frozen=True)
 class SubtitleCue:
-    """Один временной блок субтитров до сериализации в SRT/VTT."""
+    """Один временной блок субтитров до сериализации в SRT/VTT.
+
+    speaker — полное имя спикера, семантическая атрибуция для VTT <v ...>.
+    speaker_label — видимая метка для SRT, заполнена только на первом cue
+    новой реплики спикера.
+    """
 
     start: float
     end: float
     lines: tuple[str, ...]
     speaker: str | None = None
+    speaker_label: str | None = None
 
 
 def _ends_sentence(text: str) -> bool:
@@ -142,16 +151,19 @@ def _split_long_words(words: list[dict], width: int) -> list[dict]:
 
 
 def _fit_speaker(speaker: object, width: int) -> str | None:
+    """Обрезать имя спикера под видимую SRT-метку, сохранив место для текста."""
+
     if speaker is None:
         return None
     value = str(speaker).strip()
     if not value:
         return None
+    separator_width = len(SRT_SPEAKER_SEPARATOR)
     reserved_text_width = min(
         _PREFERRED_MIN_TEXT_WIDTH_WITH_SPEAKER,
-        width - _VTT_SPEAKER_MARKUP_OVERHEAD - 1,
+        width - separator_width - 1,
     )
-    max_length = max(1, width - _VTT_SPEAKER_MARKUP_OVERHEAD - reserved_text_width)
+    max_length = max(1, width - separator_width - reserved_text_width)
     if len(value) <= max_length:
         return value
     if max_length <= 2:
@@ -161,10 +173,12 @@ def _fit_speaker(speaker: object, width: int) -> str | None:
     return f"{value[:prefix_length]}…{value[-suffix_length:]}"
 
 
-def _content_line_width(width: int, speaker: str | None) -> int:
-    if speaker is None:
+def _content_line_width(width: int, label: str | None) -> int:
+    """Ширина текста строки: метка занимает место только там, где её печатают."""
+
+    if label is None:
         return width
-    return max(1, width - len(speaker) - _VTT_SPEAKER_MARKUP_OVERHEAD)
+    return max(1, width - len(label) - len(SRT_SPEAKER_SEPARATOR))
 
 
 def build_subtitle_cues(
@@ -177,10 +191,11 @@ def build_subtitle_cues(
     cues: list[SubtitleCue] = []
     grouped_words: list[dict] = []
     grouped_speaker: str | None = None
-    grouped_speaker_key: str | None = None
+    grouped_label: str | None = None
+    labeled_speaker: str | None = None
 
     def flush_group() -> None:
-        nonlocal grouped_words
+        nonlocal grouped_words, grouped_label
         sentence: list[dict] = []
         for grouped_word in grouped_words:
             sentence.append(grouped_word)
@@ -188,17 +203,19 @@ def build_subtitle_cues(
                 cues.extend(_cues_from_words(
                     sentence,
                     grouped_speaker,
+                    grouped_label,
                     options,
-                    _content_line_width(options.max_line_width, grouped_speaker),
                 ))
+                grouped_label = None
                 sentence = []
         if sentence:
             cues.extend(_cues_from_words(
                 sentence,
                 grouped_speaker,
+                grouped_label,
                 options,
-                _content_line_width(options.max_line_width, grouped_speaker),
             ))
+            grouped_label = None
         grouped_words = []
 
     for utterance in utterances:
@@ -211,19 +228,26 @@ def build_subtitle_cues(
         if not words:
             continue
         raw_speaker = utterance.get("speaker")
-        speaker_key = str(raw_speaker).strip() if raw_speaker is not None else None
-        speaker = _fit_speaker(raw_speaker, options.max_line_width)
-        line_width = _content_line_width(options.max_line_width, speaker)
-        words = _split_long_words(words, line_width)
-        can_join = bool(grouped_words) and speaker_key == grouped_speaker_key
+        speaker = str(raw_speaker).strip() if raw_speaker is not None else ""
+        speaker = speaker or None
+        can_join = bool(grouped_words) and speaker == grouped_speaker
         if can_join:
             gap = float(words[0]["start"]) - float(grouped_words[-1]["end"])
             can_join = 0.0 <= gap <= _MAX_JOIN_GAP_SECONDS
+        starts_labeled_group = False
         if not can_join:
             flush_group()
             grouped_speaker = speaker
-            grouped_speaker_key = speaker_key
-        grouped_words.extend(words)
+            grouped_label = None
+            if speaker is not None and speaker != labeled_speaker:
+                grouped_label = _fit_speaker(speaker, options.max_line_width)
+                labeled_speaker = speaker
+                starts_labeled_group = grouped_label is not None
+        split_width = _content_line_width(
+            options.max_line_width,
+            grouped_label if starts_labeled_group else None,
+        )
+        grouped_words.extend(_split_long_words(words, split_width))
 
     flush_group()
 
@@ -251,27 +275,32 @@ def _wrap_words(words: list[dict], width: int) -> tuple[str, ...]:
 def _cues_from_words(
     words: list[dict],
     speaker: str | None,
+    label: str | None,
     options: SubtitleOptions,
-    line_width: int,
 ) -> list[SubtitleCue]:
     cues: list[SubtitleCue] = []
     current: list[dict] = []
+    pending_label = label
+    line_width = _content_line_width(options.max_line_width, pending_label)
     for word in words:
         candidate = [*current, word]
         lines = _wrap_words(candidate, line_width)
         if current and len(lines) > options.max_line_count:
-            cues.append(_cue_from_words(current, speaker, line_width))
+            cues.append(_cue_from_words(current, speaker, pending_label, line_width))
+            pending_label = None
+            line_width = _content_line_width(options.max_line_width, pending_label)
             current = [word]
         else:
             current = candidate
     if current:
-        cues.append(_cue_from_words(current, speaker, line_width))
+        cues.append(_cue_from_words(current, speaker, pending_label, line_width))
     return cues
 
 
 def _cue_from_words(
     words: list[dict],
     speaker: str | None,
+    label: str | None,
     line_width: int,
 ) -> SubtitleCue:
     return SubtitleCue(
@@ -279,4 +308,5 @@ def _cue_from_words(
         end=float(words[-1]["end"]),
         lines=_wrap_words(words, line_width),
         speaker=speaker,
+        speaker_label=label,
     )

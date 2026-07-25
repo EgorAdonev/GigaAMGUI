@@ -220,3 +220,143 @@ def test_build_subtitle_cues_uses_fallback_for_incomplete_word_list():
     assert cues[0].start == pytest.approx(0.0)
     assert cues[0].end == pytest.approx(2.0)
     assert cues[0].lines == ("Первое второе.",)
+
+
+def test_speaker_label_only_on_first_cue_of_turn():
+    utterances = [
+        {
+            "transcription": "Первая фраза. Вторая фраза.",
+            "boundaries": (0.0, 2.0),
+            "speaker": "Спикер №1",
+            "words": [
+                {"text": "Первая", "start": 0.0, "end": 0.5},
+                {"text": "фраза.", "start": 0.6, "end": 1.0},
+                {"text": "Вторая", "start": 1.1, "end": 1.6},
+                {"text": "фраза.", "start": 1.7, "end": 2.0},
+            ],
+        }
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert [cue.speaker_label for cue in cues] == ["Спикер №1", None]
+    assert [cue.speaker for cue in cues] == ["Спикер №1", "Спикер №1"]
+
+
+def test_long_pause_does_not_repeat_speaker_label():
+    utterances = [
+        {
+            "transcription": "Первая фраза.",
+            "boundaries": (0.0, 1.0),
+            "speaker": "Спикер №1",
+            "words": [
+                {"text": "Первая", "start": 0.0, "end": 0.5},
+                {"text": "фраза.", "start": 0.6, "end": 1.0},
+            ],
+        },
+        {
+            "transcription": "Через паузу.",
+            "boundaries": (30.0, 31.0),
+            "speaker": "Спикер №1",
+            "words": [
+                {"text": "Через", "start": 30.0, "end": 30.5},
+                {"text": "паузу.", "start": 30.6, "end": 31.0},
+            ],
+        },
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert [cue.speaker_label for cue in cues] == ["Спикер №1", None]
+    assert [cue.speaker for cue in cues] == ["Спикер №1", "Спикер №1"]
+
+
+def test_speaker_change_reintroduces_label():
+    utterances = [
+        {
+            "transcription": "Раз.",
+            "boundaries": (0.0, 0.5),
+            "speaker": "Спикер №1",
+            "words": [{"text": "Раз.", "start": 0.0, "end": 0.5}],
+        },
+        {
+            "transcription": "Два.",
+            "boundaries": (0.6, 1.0),
+            "speaker": "Спикер №2",
+            "words": [{"text": "Два.", "start": 0.6, "end": 1.0}],
+        },
+        {
+            "transcription": "Три.",
+            "boundaries": (1.1, 1.5),
+            "speaker": "Спикер №1",
+            "words": [{"text": "Три.", "start": 1.1, "end": 1.5}],
+        },
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert [cue.speaker_label for cue in cues] == [
+        "Спикер №1",
+        "Спикер №2",
+        "Спикер №1",
+    ]
+
+
+def test_unlabeled_cues_use_full_line_width():
+    tokens = ["абвгдежзи"] * 7 + ["абвгдежзи."]
+    utterances = [
+        {
+            "transcription": " ".join(tokens),
+            "boundaries": (0.0, 8.0),
+            "speaker": "Спикер №1",
+            "words": [
+                {"text": token, "start": float(index), "end": index + 0.9}
+                for index, token in enumerate(tokens)
+            ],
+        }
+    ]
+    options = SubtitleOptions(max_line_count=1, max_line_width=40)
+
+    cues = build_subtitle_cues(utterances, options)
+
+    # Labeled cue wraps at 40 - len("Спикер №1") - len(": ") == 29 columns.
+    assert cues[0].speaker_label == "Спикер №1"
+    assert cues[0].lines == ("абвгдежзи абвгдежзи абвгдежзи",)
+    # Unlabeled cues recover the full 40 columns: four tokens instead of three.
+    assert cues[1].speaker_label is None
+    assert cues[1].lines == ("абвгдежзи абвгдежзи абвгдежзи абвгдежзи",)
+    assert cues[2].lines == ("абвгдежзи.",)
+
+
+def test_long_speaker_name_is_truncated_only_in_visible_label():
+    utterances = [
+        {
+            "transcription": "Коротко.",
+            "boundaries": (0.0, 1.0),
+            "speaker": "Очень длинное имя спикера",
+            "words": [{"text": "Коротко.", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    options = SubtitleOptions(max_line_width=40)
+
+    cues = build_subtitle_cues(utterances, options)
+
+    assert cues[0].speaker == "Очень длинное имя спикера"
+    assert cues[0].speaker_label == "Очень длин…имя спикера"
+
+
+def test_cues_without_speaker_have_no_label():
+    utterances = [
+        {
+            "transcription": "Без спикера.",
+            "boundaries": (0.0, 1.0),
+            "words": [
+                {"text": "Без", "start": 0.0, "end": 0.4},
+                {"text": "спикера.", "start": 0.5, "end": 1.0},
+            ],
+        }
+    ]
+
+    cues = build_subtitle_cues(utterances, SubtitleOptions())
+
+    assert [(cue.speaker, cue.speaker_label) for cue in cues] == [(None, None)]
