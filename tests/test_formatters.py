@@ -1,6 +1,8 @@
 """Характеризующие тесты форматтеров SRT/VTT/Markdown."""
+import re
+
 from src.core import formatters
-from src.core.subtitles import SubtitleOptions
+from src.core.subtitles import SRT_SPEAKER_SEPARATOR, SubtitleOptions
 
 
 class _TF:
@@ -35,7 +37,7 @@ def test_generate_srt():
         "\n"
         "2\n"
         "00:01:05,250 --> 00:01:12,000\n"
-        "<SPEAKER_00> второй третий\n"
+        "SPEAKER_00: второй третий\n"
     )
 
 
@@ -71,8 +73,8 @@ def test_srt_and_vtt_share_phrase_cues_and_line_wrapping():
     assert vtt.count("-->") == 2
     assert "00:00:01,000 --> 00:00:02,400" in srt
     assert "00:00:03.000 --> 00:00:04.400" in vtt
-    assert "<1> Первая короткая\nфраза." in srt
-    assert "<v 1>Первая короткая\nфраза." in vtt
+    assert "№1: Первая короткая\nфраза." in srt
+    assert "<v Спикер №1>Первая короткая\nфраза." in vtt
 
 
 def test_diarized_subtitle_prefix_respects_max_line_width():
@@ -103,11 +105,14 @@ def test_diarized_subtitle_prefix_respects_max_line_width():
         line for line in srt.splitlines()
         if line and not line.isdigit() and "-->" not in line
     ]
+    # Разметка <v ...> невидима в плеере, поэтому меряем текст без неё.
     vtt_payload = [
-        line for line in vtt.splitlines()
+        re.sub(r"^<v [^>]+>", "", line)
+        for line in vtt.splitlines()
         if line and line != "WEBVTT" and "-->" not in line
     ]
     assert all(len(line) <= 20 for line in [*srt_payload, *vtt_payload])
+    assert srt_payload[0].startswith(f"№1{SRT_SPEAKER_SEPARATOR}")
 
 
 def test_generate_markdown_speaker_header_once():
@@ -117,3 +122,34 @@ def test_generate_markdown_speaker_header_once():
     # заголовок спикера появляется один раз для двух подряд реплик одного спикера
     assert md.count("### SPEAKER_00") == 1
     assert "`01:05 - 01:10`" in md
+
+
+def test_srt_labels_speaker_once_while_vtt_attributes_every_cue():
+    utterances = [{
+        "transcription": "Первая фраза. Вторая фраза.",
+        "boundaries": (1.0, 3.0),
+        "speaker": "Спикер №1",
+        "words": [
+            {"text": "Первая", "start": 1.0, "end": 1.4},
+            {"text": "фраза.", "start": 1.5, "end": 1.9},
+            {"text": "Вторая", "start": 2.0, "end": 2.4},
+            {"text": "фраза.", "start": 2.5, "end": 2.9},
+        ],
+    }]
+
+    srt = formatters.generate_srt(utterances)
+    vtt = formatters.generate_vtt(utterances)
+
+    srt_blocks = [block for block in srt.split("\n\n") if block.strip()]
+    assert len(srt_blocks) == 2
+    assert srt_blocks[0].endswith("Спикер №1: Первая фраза.")
+    assert "Спикер" not in srt_blocks[1]
+    assert "<" not in srt
+    assert vtt.count("<v Спикер №1>") == 2
+    assert "</v>" not in vtt
+    # Оба формата описывают одни и те же cues с одинаковыми границами.
+    srt_times = [
+        line.replace(",", ".") for line in srt.splitlines() if "-->" in line
+    ]
+    vtt_times = [line for line in vtt.splitlines() if "-->" in line]
+    assert srt_times == vtt_times

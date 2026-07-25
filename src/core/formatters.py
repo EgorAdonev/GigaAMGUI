@@ -6,7 +6,7 @@ TXT/Markdown сохраняют прежнюю структуру, SRT/VTT ис�
 """
 from __future__ import annotations
 
-from .subtitles import SubtitleOptions, build_subtitle_cues
+from .subtitles import SRT_SPEAKER_SEPARATOR, SubtitleOptions, build_subtitle_cues
 
 
 def format_timestamp(seconds: float, ms_sep: str) -> str:
@@ -29,8 +29,10 @@ def generate_srt(utterances: list, options: SubtitleOptions | None = None) -> st
         )
 
         cue_lines = list(cue.lines)
-        if cue.speaker and cue_lines:
-            cue_lines[0] = f"<{cue.speaker}> {cue_lines[0]}"
+        if cue.speaker_label and cue_lines:
+            cue_lines[0] = (
+                f"{cue.speaker_label}{SRT_SPEAKER_SEPARATOR}{cue_lines[0]}"
+            )
         lines.extend(cue_lines)
         lines.append("")
 
@@ -38,7 +40,15 @@ def generate_srt(utterances: list, options: SubtitleOptions | None = None) -> st
 
 
 def generate_vtt(utterances: list, options: SubtitleOptions | None = None) -> str:
-    """Генерирует контент в формате VTT субтитров."""
+    """Генерирует контент в формате VTT субтитров.
+
+    Voice span <v ...> ставится на каждый cue: WebVTT не переносит состояние
+    между cues, поэтому cue без него теряет атрибуцию спикера. Имя не обрезаем —
+    оно невидимо в плеере и нужно для ::cue(v[voice="..."]) и внешних
+    инструментов. Закрывающий </v> опускается по спецификации, потому что span
+    занимает весь текст cue; при добавлении любой другой разметки в cue его
+    придётся вернуть.
+    """
     lines = ["WEBVTT", ""]
 
     for cue in build_subtitle_cues(utterances, options):
