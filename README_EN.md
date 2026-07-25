@@ -31,6 +31,9 @@ Russian speech-to-text transcription for audio and video powered by **GigaAM-v3*
 - Export to `txt`, `txt_timecodes`, `txt_diarize`, `txt_diarize_timecodes`, `md`, `srt`, and `vtt`.
 - SRT/VTT are split into short phrases using punctuation and word timestamps;
   line count and line width are configurable without changing TXT/MD output.
+- With diarization, SRT names a speaker only when the speaker changes
+  (`Спикер №1:`), while VTT keeps a standard `<v Спикер №1>` voice span on every
+  cue.
 - Selectable diarization through `pyannote`, ONNX PyAnnote + WeSpeaker, or NVIDIA Streaming Sortformer v2.1.
 - Automatic quality diagnostics, conservative cleanup, and timeline-safe fallback.
 - MLX RNN-T on Apple Silicon; CPU, CUDA, Intel XPU, and MPS support.
@@ -117,9 +120,12 @@ python cli.py -f audio.wav --format srt --format vtt \
 The TUI provides `/subtitle-split on|off`, `/subtitle-lines 1..4`, and
 `/subtitle-width 20..100`; these values persist between runs. Cue boundaries use
 word timestamps when available, with deterministic timing inside the original
-ASR segment as the fallback. The width limit also includes speaker markup; at
-extremely narrow widths, long speaker labels are compacted while preserving
-their identifying suffix.
+ASR segment as the fallback. With diarization, SRT names a speaker only when the
+speaker changes, and the width limit charges the label only to those cues — the
+rest use the full configured width. VTT keeps a standard `<v Спикер №1>` voice
+span on every cue: it is invisible in players but carries attribution and
+styling. At extremely narrow widths the visible label is compacted while
+preserving its identifying suffix; the VTT name is never truncated.
 
 ## Configuration
 
