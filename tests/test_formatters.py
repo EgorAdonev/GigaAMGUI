@@ -153,3 +153,26 @@ def test_srt_labels_speaker_once_while_vtt_attributes_every_cue():
     ]
     vtt_times = [line for line in vtt.splitlines() if "-->" in line]
     assert srt_times == vtt_times
+
+
+def test_truncated_speaker_label_does_not_start_with_space_in_srt():
+    # Регрессия: value[-max_length:] в _fit_speaker может срезать хвост так,
+    # что первым символом окажется пробел ("Спикер А"[-2:] == " А"). Строка
+    # субтитра не должна начинаться с пробела.
+    utterances = [
+        {
+            "transcription": "Реплика.",
+            "boundaries": (0.0, 1.0),
+            "speaker": "Спикер А",
+            "words": [{"text": "Реплика.", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    options = SubtitleOptions(max_line_width=20)
+
+    srt = formatters.generate_srt(utterances, options)
+
+    srt_payload = [
+        line for line in srt.splitlines()
+        if line and not line.isdigit() and "-->" not in line
+    ]
+    assert srt_payload[0] == srt_payload[0].lstrip()

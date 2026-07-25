@@ -511,3 +511,25 @@ def test_blank_speaker_groups_with_speakerless_utterances():
     assert cues[0].speaker is None
     assert cues[0].speaker_label is None
     assert " ".join(cues[0].lines) == "Без спикера продолжение."
+
+
+def test_truncated_label_never_starts_with_whitespace():
+    # На узкой ширине (max_line_width=20) бюджет метки для "Спикер А" — 2
+    # символа, и хвост value[-2:] попадает на пробел перед последней буквой
+    # ("...ер А" -> " А"). Метка не должна начинаться (и заканчиваться)
+    # пробелом, иначе строка субтитра визуально сдвинута.
+    utterances = [
+        {
+            "transcription": "Реплика.",
+            "boundaries": (0.0, 1.0),
+            "speaker": "Спикер А",
+            "words": [{"text": "Реплика.", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    options = SubtitleOptions(max_line_width=20)
+
+    cues = build_subtitle_cues(utterances, options)
+
+    assert cues[0].speaker == "Спикер А"
+    assert cues[0].speaker_label
+    assert cues[0].speaker_label == cues[0].speaker_label.strip()

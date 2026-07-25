@@ -170,7 +170,10 @@ def _fit_speaker(speaker: object, width: int) -> str | None:
     if len(value) <= max_length:
         return value
     if max_length <= 2:
-        return value[-max_length:]
+        # value уже strip-нут, поэтому хвост не может стать пустым; lstrip
+        # убирает пробел, попавший в срез, чтобы строка субтитра не начиналась
+        # с пробела.
+        return value[-max_length:].lstrip()
     prefix_length = (max_length - 1) // 2
     suffix_length = max_length - prefix_length - 1
     return f"{value[:prefix_length]}…{value[-suffix_length:]}"
