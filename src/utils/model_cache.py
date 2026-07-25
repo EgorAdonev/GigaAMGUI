@@ -22,17 +22,9 @@ def _contains_files(path: Path) -> bool:
     return path.is_dir() and any(candidate.is_file() for candidate in path.rglob("*"))
 
 
-def resolve_bundled_snapshot(
-    repo_id: str,
-    *,
-    bundled_root: str | Path | None = None,
-) -> Path | None:
-    """Найти готовый snapshot репозитория во встроенном кэше."""
-    root = Path(bundled_root) if bundled_root is not None else bundled_hf_cache_dir()
-    if root is None:
-        return None
-
-    repository = root / "hub" / hf_repo_cache_name(repo_id)
+def _resolve_snapshot_from_hub(repo_id: str, hub: Path) -> Path | None:
+    """Найти готовый snapshot внутри конкретного каталога Hugging Face Hub."""
+    repository = hub / hf_repo_cache_name(repo_id)
     snapshots = repository / "snapshots"
     main_ref = repository / "refs" / "main"
     if main_ref.is_file():
@@ -48,6 +40,18 @@ def resolve_bundled_snapshot(
     if len(complete) == 1:
         return complete[0]
     return None
+
+
+def resolve_bundled_snapshot(
+    repo_id: str,
+    *,
+    bundled_root: str | Path | None = None,
+) -> Path | None:
+    """Найти готовый snapshot репозитория во встроенном кэше."""
+    root = Path(bundled_root) if bundled_root is not None else bundled_hf_cache_dir()
+    if root is None:
+        return None
+    return _resolve_snapshot_from_hub(repo_id, root / "hub")
 
 
 def resolve_model_dir(
@@ -71,6 +75,13 @@ def hf_repo_is_cached(
     """Есть ли snapshot хотя бы в одном доступном локальном кэше."""
     if resolve_bundled_snapshot(repo_id, bundled_root=bundled_root) is not None:
         return True
-    if user_root is None:
-        user_root = os.environ.get("HF_HOME") or hf_cache_dir()
-    return resolve_bundled_snapshot(repo_id, bundled_root=user_root) is not None
+    if user_root is not None:
+        user_hub = Path(user_root) / "hub"
+    else:
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            user_hub = Path(HF_HUB_CACHE)
+        except ImportError:
+            user_hub = Path(os.environ.get("HF_HOME") or hf_cache_dir()) / "hub"
+    return _resolve_snapshot_from_hub(repo_id, user_hub) is not None
