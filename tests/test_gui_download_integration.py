@@ -577,6 +577,43 @@ def test_preparation_download_progress_is_visible_and_throttled():
     window.close()
 
 
+def test_disabling_diarization_clears_dependent_output_formats():
+    window = _new_window()
+    window.combo_diarization_backend.setCurrentIndex(
+        window.combo_diarization_backend.findData("sortformer")
+    )
+    window.cb_diarization.setChecked(True)
+    for fmt in ("txt_diarize", "txt_diarize_timecodes"):
+        window.format_checkboxes[fmt].setChecked(True)
+
+    window.cb_diarization.setChecked(False)
+
+    for fmt in ("txt_diarize", "txt_diarize_timecodes"):
+        assert window.format_checkboxes[fmt].isChecked() is False
+        assert window.format_checkboxes[fmt].isEnabled() is False
+        assert window.output_formats[fmt] is False
+        assert fmt not in window._get_selected_formats()
+    window.close()
+
+
+def test_disabled_diarization_normalizes_restored_output_formats():
+    window = _new_window()
+    window.user_settings.set_value("output_formats", {
+        "txt_diarize": True,
+        "txt_diarize_timecodes": True,
+    })
+    window.user_settings.set_value("enable_diarization", False)
+
+    restored = GigaTranscriberQtApp()
+
+    for fmt in ("txt_diarize", "txt_diarize_timecodes"):
+        assert restored.format_checkboxes[fmt].isChecked() is False
+        assert restored.format_checkboxes[fmt].isEnabled() is False
+        assert restored.output_formats[fmt] is False
+    restored.close()
+    window.close()
+
+
 def test_checked_diarization_stays_visible_while_controls_are_locked():
     window = _new_window()
     window.combo_diarization_backend.setCurrentIndex(

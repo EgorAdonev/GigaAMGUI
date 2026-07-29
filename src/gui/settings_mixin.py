@@ -163,10 +163,7 @@ class SettingsMixin:
         self.enable_diarization = diarization_enabled
         self.entry_num_speakers.setValue(num_speakers)
         self._update_diarization_backend_controls()
-        for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-            cb = self.format_checkboxes.get(fmt)
-            if cb:
-                cb.setEnabled(diarization_enabled)
+        self._sync_diarization_format_controls(controls_enabled=not self.is_processing)
 
         preprocessing_mode = self.user_settings.get_value(
             "audio_preprocessing_mode", AUDIO_PREPROCESSING_MODE

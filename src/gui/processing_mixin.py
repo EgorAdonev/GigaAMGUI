@@ -170,11 +170,7 @@ class ProcessingMixin:
         for cb in self.format_checkboxes.values():
             cb.setEnabled(enabled)
         self._update_subtitle_controls_enabled()
-        if enabled:
-            for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-                cb = self.format_checkboxes.get(fmt)
-                if cb:
-                    cb.setEnabled(self.enable_diarization)
+        self._sync_diarization_format_controls(controls_enabled=enabled)
 
     def _process_files(self, snapshot: dict):
         num_speakers = snapshot["num_speakers"]

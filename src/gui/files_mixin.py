@@ -108,10 +108,7 @@ class FilesMixin:
                     self.cb_diarization.blockSignals(False)
                     self.enable_diarization = False
                     self.entry_num_speakers.setEnabled(False)
-                    for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-                        cb = self.format_checkboxes.get(fmt)
-                        if cb:
-                            cb.setEnabled(False)
+                    self._sync_diarization_format_controls(controls_enabled=True)
                     return
             finally:
                 self.cb_diarization.setEnabled(True)
@@ -119,10 +116,7 @@ class FilesMixin:
         self.enable_diarization = enabling
         self.diarization_backend = backend
         self._update_diarization_backend_controls()
-        for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-            cb = self.format_checkboxes.get(fmt)
-            if cb:
-                cb.setEnabled(self.enable_diarization)
+        self._sync_diarization_format_controls(controls_enabled=not self.is_processing)
         if self.enable_diarization:
             self.log("Диаризация спикеров: ВКЛЮЧЕНА")
         else:
@@ -165,6 +159,21 @@ class FilesMixin:
                 "Pyannote: automatic speaker detection (HF_TOKEN required)",
             )
         )
+
+    def _sync_diarization_format_controls(self, *, controls_enabled: bool):
+        """Синхронизировать доступность и выбор форматов диаризации."""
+        formats_enabled = controls_enabled and self.enable_diarization
+        for fmt in ("txt_diarize", "txt_diarize_timecodes"):
+            cb = self.format_checkboxes.get(fmt)
+            if cb is None:
+                continue
+            if not self.enable_diarization:
+                signals_were_blocked = cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(signals_were_blocked)
+                self.output_formats[fmt] = False
+            cb.setEnabled(formats_enabled)
+
 
     def _toggle_format(self, fmt: str):
         self.output_formats[fmt] = self.format_checkboxes[fmt].isChecked()
