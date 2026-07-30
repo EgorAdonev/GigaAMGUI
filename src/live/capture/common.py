@@ -1,0 +1,228 @@
+"""Worker-isolated plumbing shared by platform-specific capture adapters."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from queue import Empty, SimpleQueue
+from threading import Event, Lock, Thread
+from time import time_ns
+from typing import Any, Protocol
+
+import numpy as np
+
+from ..types import CaptureDevice, CaptureEvent, CaptureEventKind, CaptureSource, PcmChunk
+from .factory import CaptureUnavailable
+from .queue import BoundedChunkQueue
+
+
+class NativeCaptureApi(Protocol):
+    def devices(self, source: CaptureSource) -> list[dict[str, Any]]: ...
+
+    def start(self, source: CaptureSource, device_id: str | None, callback: Callable[..., None]) -> None: ...
+
+    def pause(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def set_error_handler(self, handler: Callable[[Exception], None]) -> None: ...
+
+
+class SoundDeviceCapture:
+    """Optional sounddevice bridge for microphones and Pulse/PipeWire monitors."""
+
+    def __init__(self, sounddevice: Any) -> None:
+        self._sounddevice = sounddevice
+        self._stream: Any = None
+
+    def devices(self, source: CaptureSource) -> list[dict[str, Any]]:
+        default_input = getattr(getattr(self._sounddevice, "default", None), "device", [None])[0]
+        devices = []
+        for index, info in enumerate(self._sounddevice.query_devices()):
+            name = str(info["name"])
+            is_monitor = "monitor" in name.casefold()
+            if int(info.get("max_input_channels", 0)) <= 0 or is_monitor != (source is CaptureSource.SYSTEM):
+                continue
+            devices.append(
+                {
+                    "id": str(index),
+                    "name": name,
+                    "sample_rate": int(info.get("default_samplerate") or 48_000),
+                    "channels": int(info["max_input_channels"]),
+                    "is_default": index == default_input,
+                }
+            )
+        return devices
+
+    def start(self, source: CaptureSource, device_id: str | None, callback: Callable[..., None]) -> None:
+        devices = self.devices(source)
+        selected = next((item for item in devices if item["id"] == device_id), None) if device_id else next(
+            (item for item in devices if item["is_default"]), devices[0] if devices else None
+        )
+        if selected is None:
+            if source is CaptureSource.SYSTEM:
+                raise CaptureUnavailable(
+                    "No PipeWire/PulseAudio monitor source is available. Enable a Pulse monitor source and select it."
+                )
+            raise OSError("No microphone input device is available")
+
+        def on_audio(indata: Any, _frames: int, _time_info: Any, _status: Any) -> None:
+            callback(indata, None, selected["sample_rate"])
+
+        self._stream = self._sounddevice.InputStream(
+            device=int(selected["id"]),
+            samplerate=selected["sample_rate"],
+            channels=selected["channels"],
+            dtype="float32",
+            callback=on_audio,
+        )
+        self._stream.start()
+
+    def pause(self) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+
+    def stop(self) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+
+class QueuedCaptureAdapter:
+    """Keep native callback work bounded to frame copying and queue insertion."""
+
+    def __init__(
+        self,
+        source: CaptureSource,
+        api: NativeCaptureApi | None,
+        device_id: str | None = None,
+        *,
+        max_queue_frames: int = 480_000,
+        api_loader: Callable[[], NativeCaptureApi] | None = None,
+    ) -> None:
+        self.source = source
+        self._api = api
+        self._api_loader = api_loader
+        self._device_id = device_id
+        self._queue = BoundedChunkQueue(max_queue_frames)
+        self._events: SimpleQueue[CaptureEvent] = SimpleQueue()
+        self._stopped = Event()
+        self._paused = Event()
+        self._offset = 0
+        self._offset_lock = Lock()
+        self._worker: Thread | None = None
+        self._on_chunk: Callable[[PcmChunk], None] | None = None
+        self._on_event: Callable[[CaptureEvent], None] | None = None
+
+    def devices(self) -> list[CaptureDevice]:
+        return [
+            CaptureDevice(
+                id=str(device["id"]),
+                name=str(device["name"]),
+                source=self.source,
+                sample_rate=int(device["sample_rate"]),
+                channels=int(device["channels"]),
+                is_default=bool(device.get("is_default", False)),
+            )
+            for device in self._native_api().devices(self.source)
+        ]
+
+    def start(
+        self,
+        on_chunk: Callable[[PcmChunk], None],
+        on_event: Callable[[CaptureEvent], None],
+    ) -> None:
+        if self._worker is not None:
+            return
+        self._on_chunk = on_chunk
+        self._on_event = on_event
+        self._stopped.clear()
+        self._worker = Thread(target=self._dispatch, name=f"live-{self.source.value}-capture", daemon=True)
+        self._worker.start()
+        try:
+            api = self._native_api()
+            set_error_handler = getattr(api, "set_error_handler", None)
+            if callable(set_error_handler):
+                set_error_handler(self._emit_native_error)
+            api.start(self.source, self._device_id, self._capture)
+        except Exception as exc:
+            self._emit_native_error(exc)
+
+    def pause(self) -> None:
+        self._paused.set()
+        self._native_api().pause()
+
+    def stop(self) -> None:
+        if self._worker is None:
+            return
+        self._stopped.set()
+        if self._api is not None:
+            self._api.stop()
+        self._worker.join(timeout=1)
+        self._worker = None
+        self._paused.clear()
+
+    def _capture(self, frames: Any, timestamp_ns: int | None = None, sample_rate: int = 48_000) -> None:
+        if self._stopped.is_set() or self._paused.is_set():
+            return
+        copied = np.array(frames, dtype=np.float32, copy=True, order="C")
+        if copied.ndim == 1:
+            copied = copied[:, None]
+        if copied.ndim != 2 or not len(copied):
+            self._emit(CaptureEventKind.STATUS, "native capture delivered invalid PCM frames")
+            return
+        with self._offset_lock:
+            offset = self._offset
+            self._offset += len(copied)
+        chunk = PcmChunk(
+            self.source,
+            sample_rate,
+            copied.shape[1],
+            offset,
+            copied,
+            timestamp_ns or time_ns(),
+        )
+        if not self._queue.put(chunk):
+            self._emit(CaptureEventKind.OVERFLOW, f"capture queue full; dropped_frames={len(copied)}", chunk)
+
+    def _native_api(self) -> NativeCaptureApi:
+        if self._api is None:
+            if self._api_loader is None:
+                raise RuntimeError("native capture API is not configured")
+            self._api = self._api_loader()
+        return self._api
+
+    def _emit_native_error(self, exc: Exception) -> None:
+        detail = str(exc)
+        permission_words = ("permission", "screen recording", "tcc", "not authorized")
+        if isinstance(exc, PermissionError) or any(word in detail.casefold() for word in permission_words):
+            self._emit(CaptureEventKind.PERMISSION_DENIED, detail)
+        elif isinstance(exc, OSError):
+            self._emit(CaptureEventKind.DEVICE_REMOVED, detail)
+        else:
+            self._emit(CaptureEventKind.STATUS, detail)
+
+    def _emit(self, kind: CaptureEventKind, detail: str, chunk: PcmChunk | None = None) -> None:
+        self._events.put(
+            CaptureEvent(
+                kind,
+                self.source,
+                chunk.sample_offset if chunk else self._offset,
+                chunk.timestamp_ns if chunk else time_ns(),
+                detail,
+            )
+        )
+
+    def _dispatch(self) -> None:
+        while True:
+            try:
+                event = self._events.get_nowait()
+            except Empty:
+                event = None
+            if event is not None and self._on_event is not None:
+                self._on_event(event)
+            chunk = self._queue.get(timeout=0.02)
+            if chunk is not None and self._on_chunk is not None:
+                self._on_chunk(chunk)
+            if self._stopped.is_set() and chunk is None:
+                return

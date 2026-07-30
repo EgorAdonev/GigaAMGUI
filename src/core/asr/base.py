@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
+import numpy as np
+
 from .types import BackendCapabilities, TranscriptionSegment
 
 
@@ -22,6 +24,14 @@ class ASRBackend(Protocol):
         progress_callback: Callable[[float, float | None, float | None], None] | None = None,
     ) -> list[TranscriptionSegment]:
         """Transcribe long audio with backend-aware speech segmentation."""
+
+    def transcribe_window(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        offset_samples: int,
+    ) -> list[TranscriptionSegment]:
+        """Transcribe an in-memory window using source-absolute timestamps."""
 
     def unload(self) -> None:
         """Release backend resources."""

@@ -246,3 +246,5 @@ class SettingsMixin:
             self.user_settings.set_value("llm_output_dir", self.llm_output_dir)
         if self.llm_transcript_dir:
             self.user_settings.set_value("llm_transcript_dir", self.llm_transcript_dir)
+        if hasattr(self, "live_session"):
+            self._save_live_settings()

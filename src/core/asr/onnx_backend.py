@@ -6,6 +6,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
 from ...config import ASR_SEGMENTATION_MODE
 from ...utils.model_cache import resolve_model_dir
 from .chunking import normalize_chunk_words, plan_audio_chunks, stitch_overlapping_text
@@ -18,7 +20,7 @@ from .onnx_provider import (
 )
 from .onnx_vad import OnnxVadSegmenter
 from .token_timestamps import tokens_to_words
-from .types import BackendCapabilities, TranscriptionSegment
+from .types import BackendCapabilities, TranscriptionSegment, normalize_window_audio
 from .vad import VadSegmenter
 
 
@@ -149,6 +151,37 @@ class OnnxBackend:
                     audio_path,
                     progress_callback=tracked_callback,
                 )
+
+    def transcribe_window(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        offset_samples: int,
+    ) -> list[TranscriptionSegment]:
+        if self.model is None:
+            raise RuntimeError("Модель не загружена")
+        if offset_samples < 0:
+            raise ValueError("offset_samples must be non-negative")
+        window = normalize_window_audio(audio, sample_rate)
+        with self._inference_lock:
+            decoded = self.model.recognize(window, sample_rate=16_000)
+        text = str(getattr(decoded, "text", decoded) or "").strip()
+        if not text:
+            return []
+        start = offset_samples / sample_rate
+        end = start + len(window) / 16_000
+        segment: TranscriptionSegment = {"transcription": text, "boundaries": (start, end)}
+        relative_words = tokens_to_words(
+            getattr(decoded, "tokens", None),
+            getattr(decoded, "timestamps", None),
+            duration=len(window) / 16_000,
+        )
+        if relative_words is not None:
+            segment["words"] = [
+                {"text": word["text"], "start": start + word["start"], "end": start + word["end"]}
+                for word in relative_words
+            ]
+        return [segment]
 
     def _retry_on_cpu_after_provider_failure(self, exc: Exception) -> bool:
         selection = self.provider_selection

@@ -41,6 +41,8 @@ from .asr_backend_dialog import ASRBackendDialog, is_mlx_supported
 from .download_mixin import DownloadMixin
 from .files_mixin import FilesMixin
 from .i18n_mixin import I18nMixin
+from .live_mixin import LiveMixin
+from .live_ui_mixin import LiveUiMixin
 from .llm_mixin import LlmMixin
 from .llm_ui_mixin import LlmUiMixin
 from .processing_mixin import ProcessingMixin
@@ -70,6 +72,10 @@ class WorkerSignals(QObject):
     llm_progress_started = pyqtSignal(int, int)
     llm_response_ready = pyqtSignal()
     llm_stream_chunk = pyqtSignal(str)
+    live_status = pyqtSignal(object)
+    live_event = pyqtSignal(object)
+    live_finished = pyqtSignal(object)
+    live_answer = pyqtSignal(str, str)
 
 
 class GigaApplication(QApplication):
@@ -110,6 +116,7 @@ class GigaApplication(QApplication):
 class GigaTranscriberQtApp(
     LlmMixin, LlmUiMixin, DownloadMixin, ProcessingMixin, FilesMixin,
     I18nMixin, SettingsMixin, StyleMixin, ThemeMixin, ProcessingOptionsUiMixin,
+    LiveMixin, LiveUiMixin,
     UiBuildMixin, QMainWindow,
 ):
     """Главное окно приложения для транскрибации на PyQt6"""
@@ -167,6 +174,7 @@ class GigaTranscriberQtApp(
         self.time_formatter = TimeFormatter()
         self.user_settings = UserSettings()
         self.media_downloader = MediaDownloader()
+        self._init_live_state()
 
         self._theme = self.user_settings.settings.get("theme", "dark")
         self._lang = self.user_settings.settings.get("language", "ru")
@@ -187,6 +195,10 @@ class GigaTranscriberQtApp(
         self.signals.llm_progress_started.connect(self._start_llm_progress)
         self.signals.llm_response_ready.connect(self._on_llm_response_ready)
         self.signals.llm_stream_chunk.connect(self._on_llm_stream_chunk)
+        self.signals.live_status.connect(self._update_live_status)
+        self.signals.live_event.connect(self._update_live_overlay)
+        self.signals.live_finished.connect(self._on_live_finished)
+        self.signals.live_answer.connect(self._update_live_answer)
 
         saved_output_dir = self.user_settings.get_last_output_dir()
         saved_input_dir = self.user_settings.get_last_files_dir()
@@ -208,6 +220,7 @@ class GigaTranscriberQtApp(
 
         self._init_ui()
         self._restore_ui_settings()
+        self._restore_live_settings()
         self.setAcceptDrops(True)
 
         if saved_output_dir:

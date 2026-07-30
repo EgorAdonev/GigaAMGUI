@@ -1,8 +1,15 @@
 """Проверки контрактов ASR и общих утилит."""
 
+import numpy as np
 import pytest
 
-from src.core.asr.types import BackendCapabilities, TranscriptionSegment, parse_bool, validate_backend_name
+from src.core.asr.types import (
+    BackendCapabilities,
+    TranscriptionSegment,
+    WindowTranscriptionRequest,
+    parse_bool,
+    validate_backend_name,
+)
 
 
 def test_validate_backend_name_accepts_known_values():
@@ -79,3 +86,11 @@ def test_progress_callback_signature_remains_optional():
 
     backend: ASRBackend = _NoopBackend()
     assert backend.transcribe_longform("x.wav") == []
+
+
+def test_window_request_preserves_absolute_offset():
+    request = WindowTranscriptionRequest(np.zeros(16_000, dtype=np.float32), 16_000, 48_000)
+
+    assert request.offset_samples == 48_000
+    assert request.sample_rate == 16_000
+    assert request.audio.dtype == np.float32

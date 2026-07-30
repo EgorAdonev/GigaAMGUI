@@ -7,6 +7,8 @@ import os
 import threading
 from collections.abc import Callable
 
+import numpy as np
+
 from ...config import ASR_SEGMENTATION_MODE, ASR_VAD_DEVICE
 from .chunking import (
     AudioChunk,
@@ -15,7 +17,7 @@ from .chunking import (
     stitch_overlapping_text,
 )
 from .token_timestamps import tokens_to_words
-from .types import BackendCapabilities, TranscriptionSegment
+from .types import BackendCapabilities, TranscriptionSegment, normalize_window_audio
 from .vad import PyannoteVadSegmenter, VadSegmenter, VadUnavailableError, resolve_vad_device
 
 # Conv1dSubsampling энкодера — два Conv1d со stride 2, то есть 4 кадра mel на кадр выхода.
@@ -131,6 +133,47 @@ class MLXBackend:
             segments.append(segment)
 
         return segments
+
+    def transcribe_window(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        offset_samples: int,
+    ) -> list[TranscriptionSegment]:
+        if self.model is None or self._gigaam_mlx is None:
+            raise RuntimeError("MLX backend is not initialized")
+        if offset_samples < 0:
+            raise ValueError("offset_samples must be non-negative")
+        window = normalize_window_audio(audio, sample_rate)
+        start = offset_samples / sample_rate
+        with self._lock:
+            gm = self._gigaam_mlx
+            mx = __import__("mlx.core", fromlist=["array"])
+            mel = gm.audio.compute_mel(window)
+            encoded, sequence_length = self.model.encode(mx.array(mel[None, :]))
+            mx.eval(encoded)
+            decoded = self._decode_with_frames(encoded, sequence_length, mx)
+            if decoded is None:
+                token_ids = self.model.decode(encoded, sequence_length)
+                frames = None
+            else:
+                token_ids, frames = decoded
+            text = str(self.tokenizer.decode(token_ids) if self.tokenizer is not None else "").strip()
+            words = self._words_from_frames(
+                token_ids,
+                frames,
+                decode_start_sec=start,
+                duration=len(window) / 16_000,
+            )
+        if not text:
+            return []
+        segment: TranscriptionSegment = {
+            "transcription": text,
+            "boundaries": (start, start + len(window) / 16_000),
+        }
+        if words is not None:
+            segment["words"] = words
+        return [segment]
 
     def _fixed_chunks(self, audio) -> list[dict]:
         gm = self._gigaam_mlx

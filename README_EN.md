@@ -57,6 +57,22 @@ HF_TOKEN=your_huggingface_token_here
 
 For diarization, accept the terms for `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`.
 
+### Optional: live capture
+
+```bash
+# macOS 13+: ScreenCaptureKit for system audio, sounddevice for microphones
+python -m pip install -r requirements-live-macos.txt
+
+# Linux: sounddevice; system audio is available only from a PipeWire/PulseAudio monitor source
+python -m pip install -r requirements-live-linux.txt
+```
+
+macOS requires **Microphone** permission for microphone capture and **Screen
+Recording** permission for system audio. ScreenCaptureKit requires macOS 13 or
+newer. Linux does not create a monitor source: enable PipeWire-Pulse or PulseAudio
+and confirm an input device named `Monitor` is available. Missing dependencies,
+permissions, or monitor sources report an error and do not create an audio track.
+
 ### Optional: NVIDIA Sortformer
 
 The full macOS `.app` already bundles Sortformer and NeMo. When running from

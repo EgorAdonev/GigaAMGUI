@@ -110,10 +110,11 @@ def test_log_is_on_dedicated_tab():
     window = GigaTranscriberQtApp()
     window._lang = "ru"
     window._apply_language()
-    assert window.tabs.count() == 3
+    assert window.tabs.count() == 4
     assert window.tabs.tabText(0) == "Обработка"
-    assert window.tabs.tabText(1) == "LLM"
-    assert "Журнал" in window.tabs.tabText(2)
+    assert window.tabs.tabText(1) == "Live"
+    assert window.tabs.tabText(2) == "LLM"
+    assert "Журнал" in window.tabs.tabText(3)
     # Журнал лежит на отдельной вкладке, и логирование в него работает
     window.log("тестовое сообщение")
     assert "тестовое сообщение" in window.log_text.toPlainText()

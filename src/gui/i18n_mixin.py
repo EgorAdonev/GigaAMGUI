@@ -48,8 +48,9 @@ class I18nMixin:
             self._title_label.setText("GigaAM v3: Транскрибация" if is_ru else "GigaAM v3: Transcription")
         if hasattr(self, "tabs"):
             self.tabs.setTabText(0, "Обработка" if is_ru else "Process")
-            self.tabs.setTabText(1, "LLM")
-            self.tabs.setTabText(2, "Журнал обработки" if is_ru else "Processing log")
+            self.tabs.setTabText(1, "Live")
+            self.tabs.setTabText(2, "LLM")
+            self.tabs.setTabText(3, "Журнал обработки" if is_ru else "Processing log")
         if hasattr(self, "btn_start"):
             self.btn_start.setText("ЗАПУСТИТЬ ОБРАБОТКУ" if is_ru else "START PROCESSING")
         if hasattr(self, "btn_clear"):

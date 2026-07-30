@@ -38,6 +38,21 @@ class _FakeTimestampModel:
         return self.results.pop(0)
 
 
+def test_window_transcription_resamples_and_preserves_absolute_offset():
+    model = _FakeTimestampModel([SimpleNamespace(text="window", tokens=None, timestamps=None)])
+    backend = OnnxBackend(
+        model_factory=lambda *args, **kwargs: model,
+        available_provider_probe=lambda: ("CPUExecutionProvider",),
+    )
+    assert backend.load()
+
+    result = backend.transcribe_window(np.zeros(8_000, dtype=np.float32), 8_000, 24_000)
+
+    assert model.recognize_calls[0][1] == 16_000
+    assert len(model.recognize_calls[0][0]) == 16_000
+    assert result == [{"transcription": "window", "boundaries": (3.0, 4.0)}]
+
+
 def test_load_passes_model_provider_quantization_and_local_path(tmp_path):
     calls = []
     raw_model = _FakeTimestampModel()

@@ -57,6 +57,22 @@ HF_TOKEN=your_huggingface_token_here
 
 Для диаризации нужно принять условия моделей `pyannote/speaker-diarization-3.1` и `pyannote/segmentation-3.0`.
 
+### Опционально: захват в реальном времени
+
+```bash
+# macOS 13+: ScreenCaptureKit для системного звука, sounddevice для микрофона
+python -m pip install -r requirements-live-macos.txt
+
+# Linux: sounddevice; системный звук доступен только как monitor source PipeWire/PulseAudio
+python -m pip install -r requirements-live-linux.txt
+```
+
+macOS требует разрешения **Microphone** для микрофона и **Screen Recording** для
+системного звука. ScreenCaptureKit доступен с macOS 13. На Linux приложение не
+создаёт monitor source: включите совместимость PipeWire-Pulse или PulseAudio и
+проверьте, что входное устройство с `Monitor` в названии доступно. При отсутствии
+пакета, разрешения или monitor source захват сообщает ошибку и не создаёт дорожку.
+
 ### Опционально: NVIDIA Sortformer
 
 В полной macOS `.app` Sortformer и NeMo уже включены. При запуске проекта из

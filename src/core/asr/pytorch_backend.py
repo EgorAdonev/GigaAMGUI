@@ -9,6 +9,8 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
+import numpy as np
+
 from ...config import (
     ASR_SEGMENTATION_MODE,
     ASR_VAD_DEVICE,
@@ -21,7 +23,7 @@ from .chunking import (
     plan_audio_chunks,
     stitch_overlapping_text,
 )
-from .types import BackendCapabilities, TranscriptionSegment, TranscriptionWord
+from .types import BackendCapabilities, TranscriptionSegment, TranscriptionWord, normalize_window_audio
 from .vad import PyannoteVadSegmenter, VadSegmenter, VadUnavailableError, resolve_vad_device
 
 
@@ -222,6 +224,39 @@ class PyTorchBackend:
         """Serialize access to the shared GigaAM and pyannote models."""
         with self._inference_lock:
             return self._transcribe_longform_unlocked(audio_path, progress_callback)
+
+    def transcribe_window(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        offset_samples: int,
+    ) -> list[TranscriptionSegment]:
+        if self.model is None:
+            raise RuntimeError("Модель не загружена")
+        if offset_samples < 0:
+            raise ValueError("offset_samples must be non-negative")
+        import torch
+
+        window = normalize_window_audio(audio, sample_rate)
+        start = offset_samples / sample_rate
+        with self._inference_lock, torch.inference_mode():
+            model = cast(Any, self.model)
+            wav = torch.from_numpy(window).to(model._device).to(model._dtype).unsqueeze(0)
+            length = torch.full([1], wav.shape[-1], device=model._device)
+            encoded, encoded_len = model.forward(wav, length)
+            text, relative_words = self._decode_chunk(model, encoded, encoded_len, length)
+        if not text:
+            return []
+        segment: TranscriptionSegment = {
+            "transcription": text,
+            "boundaries": (start, start + len(window) / 16_000),
+        }
+        if relative_words is not None:
+            segment["words"] = [
+                {"text": word["text"], "start": start + word["start"], "end": start + word["end"]}
+                for word in relative_words
+            ]
+        return [segment]
 
     def _transcribe_longform_unlocked(
         self,

@@ -118,6 +118,13 @@ class UiBuildMixin:
         proc_scroll.setWidget(content_widget)
         tabs.addTab(proc_scroll, "Обработка")
 
+        live_scroll = QScrollArea()
+        live_scroll.setWidgetResizable(True)
+        live_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        live_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        live_scroll.setWidget(self._create_live_tab())
+        tabs.addTab(live_scroll, "Live")
+
         llm_scroll = QScrollArea()
         llm_scroll.setWidgetResizable(True)
         llm_scroll.setFrameShape(QFrame.Shape.NoFrame)
