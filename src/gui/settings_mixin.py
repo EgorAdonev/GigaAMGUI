@@ -19,10 +19,41 @@ from ..config import (
     LLM_TEMPERATURE,
     save_env_value,
 )
+from ..data_paths import save_data_dir_selection
 from .llm_mixin import SUMMARY_PROMPT, TASKS_PROMPT
 
 
 class SettingsMixin:
+    def _select_data_directory(self):
+        """Сохранить новый единый data root; он применится после restart."""
+        current = os.environ.get("GIGAAM_DATA_DIR") or os.path.expanduser("~")
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            self._t("Папка данных GigaAM", "GigaAM data directory"),
+            current,
+        )
+        if not selected:
+            return
+        try:
+            save_data_dir_selection(selected)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                self._t("Папка данных", "Data directory"),
+                self._t("Не удалось сохранить выбор:\n", "Could not save the selection:\n") + str(exc),
+            )
+            return
+        QMessageBox.information(
+            self,
+            self._t("Папка данных", "Data directory"),
+            self._t(
+                f"Новая папка сохранена:\n{selected}\n\nПерезапустите приложение. "
+                "Существующие модели автоматически не перемещаются.",
+                f"The new directory has been saved:\n{selected}\n\nRestart the application. "
+                "Existing models are not moved automatically.",
+            ),
+        )
+
     def _restore_geometry(self):
         # Геометрию из безголовых/тестовых сессий не восстанавливаем
         if self._is_headless():
@@ -107,6 +138,17 @@ class SettingsMixin:
             cb.blockSignals(False)
             self.output_formats[fmt] = cb.isChecked()
 
+        self.cb_subtitle_sentence_split.setChecked(bool(
+            self.user_settings.get_value("subtitle_sentence_split", True)
+        ))
+        self.spin_subtitle_max_lines.setValue(int(
+            self.user_settings.get_value("subtitle_max_line_count", 2) or 2
+        ))
+        self.spin_subtitle_max_width.setValue(int(
+            self.user_settings.get_value("subtitle_max_line_width", 64) or 64
+        ))
+        self._update_subtitle_controls_enabled()
+
         diarization_enabled = bool(self.user_settings.get_value("enable_diarization", False))
         diarization_backend = self.user_settings.get_value("diarization_backend", "pyannote")
         num_speakers = int(self.user_settings.get_value("num_speakers", 0) or 0)
@@ -121,10 +163,7 @@ class SettingsMixin:
         self.enable_diarization = diarization_enabled
         self.entry_num_speakers.setValue(num_speakers)
         self._update_diarization_backend_controls()
-        for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-            cb = self.format_checkboxes.get(fmt)
-            if cb:
-                cb.setEnabled(diarization_enabled)
+        self._sync_diarization_format_controls(controls_enabled=not self.is_processing)
 
         preprocessing_mode = self.user_settings.get_value(
             "audio_preprocessing_mode", AUDIO_PREPROCESSING_MODE
@@ -203,6 +242,15 @@ class SettingsMixin:
 
     def _save_ui_settings(self):
         self.user_settings.set_value("output_formats", self.output_formats)
+        self.user_settings.set_value(
+            "subtitle_sentence_split", self.cb_subtitle_sentence_split.isChecked()
+        )
+        self.user_settings.set_value(
+            "subtitle_max_line_count", self.spin_subtitle_max_lines.value()
+        )
+        self.user_settings.set_value(
+            "subtitle_max_line_width", self.spin_subtitle_max_width.value()
+        )
         self.user_settings.set_value("enable_diarization", self.cb_diarization.isChecked())
         self.user_settings.set_value("diarization_backend", self.combo_diarization_backend.currentData())
         self.user_settings.set_value("num_speakers", self.entry_num_speakers.value())

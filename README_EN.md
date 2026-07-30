@@ -29,6 +29,11 @@ Russian speech-to-text transcription for audio and video powered by **GigaAM-v3*
 
 - Batch processing, recursive folder scans, drag & drop, and media downloads through `yt-dlp`.
 - Export to `txt`, `txt_timecodes`, `txt_diarize`, `txt_diarize_timecodes`, `md`, `srt`, and `vtt`.
+- SRT/VTT are split into short phrases using punctuation and word timestamps;
+  line count and line width are configurable without changing TXT/MD output.
+- With diarization, SRT names a speaker only when the speaker changes
+  (`Спикер №1:`), while VTT keeps a standard `<v Спикер №1>` voice span on every
+  cue.
 - Selectable diarization through `pyannote`, ONNX PyAnnote + WeSpeaker, or NVIDIA Streaming Sortformer v2.1.
 - Automatic quality diagnostics, conservative cleanup, and timeline-safe fallback.
 - MLX RNN-T on Apple Silicon; CPU, CUDA, Intel XPU, and MPS support.
@@ -117,15 +122,103 @@ curl -fsSL https://raw.githubusercontent.com/dubr1k/GigaAMGUI/main/scripts/insta
 gigaam
 ```
 
+### Subtitle settings
+
+Desktop GUI and Web UI expose subtitle controls next to the SRT/VTT formats.
+The CLI accepts `--subtitle-sentence-split/--no-subtitle-sentence-split`,
+`--subtitle-max-lines`, and `--subtitle-max-width`:
+
+```bash
+python cli.py -f audio.wav --format srt --format vtt \
+  --subtitle-sentence-split --subtitle-max-lines 2 --subtitle-max-width 64
+```
+
+The TUI provides `/subtitle-split on|off`, `/subtitle-lines 1..4`, and
+`/subtitle-width 20..100`; these values persist between runs. Cue boundaries use
+word timestamps when available, with deterministic timing inside the original
+ASR segment as the fallback. With diarization, SRT names a speaker only when the
+speaker changes, and the width limit charges the label only to those cues — the
+rest use the full configured width. VTT keeps a standard `<v Спикер №1>` voice
+span on every cue: it is invisible in players but carries attribution and
+styling. At extremely narrow widths the visible label is compacted while
+preserving its identifying suffix; the VTT name is never truncated.
+
 ## Configuration
 
-For the Web UI, add these values to `.env`:
+### Data and model directory
+
+Set `GIGAAM_DATA_DIR` to place every large download on a drive of your choice.
+The application creates `runtimes` plus dedicated `models/gigaam`,
+`models/huggingface`, `models/onnx`, `models/torch`, `models/nemo`, and
+`models/deepfilter` subdirectories. This covers the PyTorch runtime, GigaAM,
+ONNX/MLX, Pyannote/Sortformer, NeMo, and DeepFilterNet.
+
+- **Desktop GUI:** use `Settings → Data and model directory…`. Portable builds
+  also offer this choice before the first download. Restart after changing it;
+  existing models are deliberately not moved automatically.
+- **GUI/CLI:** `python app.py --data-dir /mnt/large/GigaAMData` or
+  `python cli.py --data-dir /mnt/large/GigaAMData ...`.
+- **TUI:** `gigaam --data-dir /mnt/large/GigaAMData`.
+- **REST API/Web:** set `GIGAAM_DATA_DIR` before server startup. With Docker
+  Compose it is the selected **host** path:
+
+```bash
+GIGAAM_DATA_DIR=/mnt/large/GigaAMData docker compose up -d --build gigaam-web
+```
+
+Specialized variables (`HF_HOME`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`,
+`TORCH_HOME`, `NEMO_HOME`, `ONNX_MODEL_DIR`, `GIGAAM_RUNTIME_DIR`, `GIGAAM_CONFIG_DIR`,
+`GIGAAM_PYTORCH_MODEL_DIR`, and `GIGAAM_DEEPFILTER_DIR`) retain priority for
+advanced layouts. On Windows, keep model/runtime paths free of Cyrillic
+characters because some native DLL loaders cannot handle them reliably.
+
+Small user settings stay in the system config directory so changing disks does
+not reset language, tokens, or processing preferences. Set `GIGAAM_CONFIG_DIR`
+separately when a fully self-contained configuration is required.
+
+For the Web UI, configure `.env`:
 
 ```env
 WEB_SECRET=change_me
 WEB_USERNAME=admin
 WEB_PASSWORD=replace_with_strong_password
 ```
+
+### Deploying the Web UI with Docker
+
+```bash
+cp .env.example .env
+mkdir -p uploads results logs cache
+docker compose up -d --build gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Compose mounts the host-side `GIGAAM_DATA_DIR` at `/data` inside the container.
+Do not put host absolute paths into `HF_HOME`, `TORCH_HOME`, `NEMO_HOME`,
+`ONNX_MODEL_DIR`, or `GIGAAM_RUNTIME_DIR`: container caches must remain below
+`/data`. The container root filesystem is read-only, so moving caches back under
+`/home` will break VAD or diarization-model downloads.
+
+When upgrading, rebuild the container but preserve `GIGAAM_DATA_DIR`, `uploads`,
+`results`, and `logs`. Models and user files live in those mounts, and the new
+container reuses them automatically; they do not need to be copied into a backup
+of the container itself. If root created the bind-mount directories, grant UID
+`1000` write access before starting the service.
+
+After an upgrade, check the health endpoint and logs in addition to container
+status:
+
+```bash
+docker compose ps gigaam-web
+docker compose logs --tail=200 gigaam-web
+curl -fsS http://127.0.0.1:8001/health
+```
+
+For diarization workloads, also confirm that the log contains neither `Read-only
+file system` nor `VAD unavailable`, and that ASR segmentation uses VAD instead of
+the emergency `overlap_chunks` fallback. You can retain a tag for the previous
+image before upgrading for a quick rollback. Configure nginx or another reverse
+proxy to the container at `127.0.0.1:8001` separately.
 
 For RTX 50xx / Blackwell, install a compatible PyTorch build first:
 

@@ -19,6 +19,7 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    needs: test-tui
 
     strategy:
       fail-fast: false
@@ -55,10 +56,10 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      # ffmpeg нужен приложению в рантайме; в Linux ставим системный для сборки IO-зависимостей.
-      - name: Install ffmpeg (Linux)
+      # ffmpeg нужен приложению в рантайме; EGL/GL — для offscreen PyQt GUI-тестов.
+      - name: Install ffmpeg and Qt runtime libraries (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libegl1 libgl1
 
       # --- Вкладываем ПРАВИЛЬНЫЙ по ОС/арх. ffmpeg в bin/, чтобы он вшился в
       # портативный бинарник (спек забирает bin/ffmpeg.exe на Windows и
@@ -176,6 +177,17 @@ jobs:
           tests/test_sortformer_onnx.py
           tests/test_app_sortformer_smoke.py
           tests/test_processor_progress.py
+          tests/test_subtitles.py
+          tests/test_formatters.py
+          tests/test_diarization_mapping.py
+          tests/test_cli_backend.py
+          tests/test_tui_worker.py
+          tests/test_web_app_persistence.py
+          tests/test_data_paths.py
+          tests/test_portable_data_interfaces.py
+          tests/test_gui_data_directory.py
+          tests/test_app_boot.py
+          tests/test_download_models.py
           -q
 
       - name: Build (PyInstaller, portable spec)
@@ -312,6 +324,7 @@ jobs:
   build-macos-full:
     name: macOS arm64 full app bundle
     runs-on: macos-14
+    needs: test-tui
     timeout-minutes: 60
     env:
       GIGAAM_BUNDLE_SORTFORMER: "1"
@@ -440,3 +453,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.archive_offline.outputs.path }}
+
+  test-tui:
+    name: TUI tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test TUI
+        working-directory: tui
+        run: cargo test --locked

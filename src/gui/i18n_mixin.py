@@ -128,6 +128,15 @@ class I18nMixin:
             for fmt, cb in self.format_checkboxes.items():
                 ru_label, en_label = format_labels.get(fmt, (cb.text(), cb.text()))
                 cb.setText(ru_label if is_ru else en_label)
+            self.cb_subtitle_sentence_split.setText(
+                "Разбивать по предложениям" if is_ru else "Split by sentences"
+            )
+            self.lbl_subtitle_max_lines.setText(
+                "Строк:" if is_ru else "Lines:"
+            )
+            self.lbl_subtitle_max_width.setText(
+                "Символов:" if is_ru else "Characters:"
+            )
         if hasattr(self, "grp_llm_source"):
             self.grp_llm_source.setTitle("1. Источник транскрипта" if is_ru else "1. Transcript source")
             self.grp_llm_output.setTitle("2. Куда сохранить" if is_ru else "2. Save location")
@@ -223,6 +232,9 @@ class I18nMixin:
             self._menu_file.setTitle("Файл" if is_ru else "File")
             self._menu_view.setTitle("Вид" if is_ru else "View")
             self._menu_settings.setTitle("Настройки" if is_ru else "Settings")
+            if hasattr(self, "_act_data_dir"):
+                self._act_data_dir.setText("Папка данных и моделей…" if is_ru else "Data and model directory…")
+                self._act_data_dir.setStatusTip("Выбрать диск для моделей, кэшей и runtime" if is_ru else "Choose a drive for models, caches, and runtimes")
             self._menu_help.setTitle("Справка" if is_ru else "Help")
             self._act_files.setText("Выбрать файлы…" if is_ru else "Choose files…")
             self._act_folder.setText("Выбрать папку с файлами…" if is_ru else "Choose folder with files…")

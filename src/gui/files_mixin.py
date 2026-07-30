@@ -108,10 +108,7 @@ class FilesMixin:
                     self.cb_diarization.blockSignals(False)
                     self.enable_diarization = False
                     self.entry_num_speakers.setEnabled(False)
-                    for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-                        cb = self.format_checkboxes.get(fmt)
-                        if cb:
-                            cb.setEnabled(False)
+                    self._sync_diarization_format_controls(controls_enabled=True)
                     return
             finally:
                 self.cb_diarization.setEnabled(True)
@@ -119,10 +116,7 @@ class FilesMixin:
         self.enable_diarization = enabling
         self.diarization_backend = backend
         self._update_diarization_backend_controls()
-        for fmt in ('txt_diarize', 'txt_diarize_timecodes'):
-            cb = self.format_checkboxes.get(fmt)
-            if cb:
-                cb.setEnabled(self.enable_diarization)
+        self._sync_diarization_format_controls(controls_enabled=not self.is_processing)
         if self.enable_diarization:
             self.log("Диаризация спикеров: ВКЛЮЧЕНА")
         else:
@@ -166,8 +160,43 @@ class FilesMixin:
             )
         )
 
+    def _sync_diarization_format_controls(self, *, controls_enabled: bool):
+        """Синхронизировать доступность и выбор форматов диаризации."""
+        formats_enabled = controls_enabled and self.enable_diarization
+        for fmt in ("txt_diarize", "txt_diarize_timecodes"):
+            cb = self.format_checkboxes.get(fmt)
+            if cb is None:
+                continue
+            if not self.enable_diarization:
+                signals_were_blocked = cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(signals_were_blocked)
+                self.output_formats[fmt] = False
+            cb.setEnabled(formats_enabled)
+
+
     def _toggle_format(self, fmt: str):
         self.output_formats[fmt] = self.format_checkboxes[fmt].isChecked()
+        self._update_subtitle_controls_enabled()
+
+    def _update_subtitle_controls_enabled(self):
+        """Настройки cue доступны только для выбранных SRT/VTT вне обработки."""
+        if not hasattr(self, "spin_subtitle_max_lines"):
+            return
+        selected = any(
+            self.format_checkboxes.get(fmt) is not None
+            and self.format_checkboxes[fmt].isChecked()
+            for fmt in ("srt", "vtt")
+        )
+        enabled = selected and not self.is_processing
+        for widget in (
+            self.cb_subtitle_sentence_split,
+            self.lbl_subtitle_max_lines,
+            self.spin_subtitle_max_lines,
+            self.lbl_subtitle_max_width,
+            self.spin_subtitle_max_width,
+        ):
+            widget.setEnabled(enabled)
 
     def _get_selected_formats(self) -> list:
         return [fmt for fmt, enabled in self.output_formats.items() if enabled]

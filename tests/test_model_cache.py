@@ -2,6 +2,7 @@ from pathlib import Path
 
 from src.utils.model_cache import (
     hf_repo_cache_name,
+    hf_repo_is_cached,
     resolve_bundled_snapshot,
     resolve_model_dir,
 )
@@ -57,3 +58,14 @@ def test_explicit_model_directory_wins_over_bundle(tmp_path):
         explicit=explicit,
         bundled_root=bundled,
     ) == explicit
+
+
+def test_cached_repo_uses_huggingface_hub_selected_cache(tmp_path, monkeypatch):
+    expected = _snapshot(tmp_path, "org/model")
+    from huggingface_hub import constants as hf_constants
+
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "different-home"))
+
+    assert expected.is_dir()
+    assert hf_repo_is_cached("org/model") is True
