@@ -85,29 +85,57 @@ class AlignedMixer:
     def mix(self, chunks: Mapping[CaptureSource, PcmChunk]) -> PcmChunk:
         if not chunks:
             raise ValueError("at least one chunk is required")
-        reference = next(iter(chunks.values()))
-        for chunk in chunks.values():
-            if (
-                chunk.sample_rate != reference.sample_rate
-                or chunk.channels != reference.channels
-                or chunk.sample_offset != reference.sample_offset
-                or chunk.frames.shape != reference.frames.shape
-            ):
-                raise ValueError("chunks must share format, offset, and frame count")
-
-        mixed = np.zeros_like(reference.frames)
+        reference = chunks.get(CaptureSource.MIC) or chunks.get(CaptureSource.SYSTEM) or next(iter(chunks.values()))
+        start_ns = min(chunk.timestamp_ns for chunk in chunks.values())
+        normalized = {
+            source: self._normalize(chunk, reference.sample_rate, reference.channels)
+            for source, chunk in chunks.items()
+        }
+        starts = {
+            source: round((chunk.timestamp_ns - start_ns) * reference.sample_rate / 1_000_000_000)
+            for source, chunk in chunks.items()
+        }
+        frame_count = max(starts[source] + len(frames) for source, frames in normalized.items())
+        mixed = np.zeros((frame_count, reference.channels), dtype=np.float32)
         mic = chunks.get(CaptureSource.MIC)
         system = chunks.get(CaptureSource.SYSTEM)
         if mic is not None:
-            mixed += self._mic_gain * mic.frames
+            start = starts[CaptureSource.MIC]
+            frames = normalized[CaptureSource.MIC]
+            mixed[start:start + len(frames)] += self._mic_gain * frames
         if system is not None:
-            mixed += self._system_gain * system.frames
+            start = starts[CaptureSource.SYSTEM]
+            frames = normalized[CaptureSource.SYSTEM]
+            mixed[start:start + len(frames)] += self._system_gain * frames
         np.clip(mixed, -1.0, 1.0, out=mixed)
         return PcmChunk(
             CaptureSource.MIC,
             reference.sample_rate,
             reference.channels,
-            reference.sample_offset,
+            max(0, reference.sample_offset - starts[reference.source]),
             mixed,
-            reference.timestamp_ns,
+            start_ns,
         )
+
+    @staticmethod
+    def _normalize(chunk: PcmChunk, sample_rate: int, channels: int) -> np.ndarray:
+        frames = chunk.frames
+        if chunk.channels != channels:
+            if channels == 1:
+                frames = frames.mean(axis=1, dtype=np.float32)[:, None]
+            elif chunk.channels == 1:
+                frames = np.repeat(frames, channels, axis=1)
+            elif chunk.channels > channels:
+                frames = frames[:, :channels]
+            else:
+                frames = np.concatenate(
+                    (frames, np.repeat(frames[:, -1:], channels - chunk.channels, axis=1)), axis=1
+                )
+        if chunk.sample_rate == sample_rate or not len(frames):
+            return frames.copy()
+        frame_count = round(len(frames) * sample_rate / chunk.sample_rate)
+        positions = np.linspace(0, len(frames) - 1, frame_count, dtype=np.float32)
+        return np.stack(
+            [np.interp(positions, np.arange(len(frames)), frames[:, channel]) for channel in range(channels)],
+            axis=1,
+        ).astype(np.float32)

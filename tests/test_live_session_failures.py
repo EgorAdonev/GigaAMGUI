@@ -45,6 +45,13 @@ class FakeScheduler:
         self._on_error(RuntimeError("decode failed"))
 
 
+def source_chunk(source, *, offset=0, timestamp_ns=1, frame_count=4_800):
+    return PcmChunk(
+        source, 48_000, 1, offset,
+        np.ones((frame_count, 1), dtype=np.float32), timestamp_ns,
+    )
+
+
 def test_removed_system_source_does_not_stop_microphone(tmp_path):
     mic = FakeAdapter()
     system = FakeAdapter()
@@ -104,3 +111,95 @@ def test_startup_permission_event_does_not_leave_source_active(tmp_path):
 
     assert session.status().state is CaptureState.FAILED
     assert session.status().active_sources == set()
+
+
+def test_mix_failure_is_throttled_without_stopping_source_recording_or_asr(tmp_path):
+    class RecordingScheduler(FakeScheduler):
+        def __init__(self):
+            super().__init__()
+            self.submitted = []
+
+        def submit(self, chunk):
+            self.submitted.append(chunk)
+
+    class FailingMixRecorder:
+        def __init__(self, *args):
+            self.written = []
+
+        def write(self, chunk):
+            self.written.append(chunk)
+
+        def write_mix(self, chunk):
+            raise RuntimeError("mix writer failed")
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    schedulers = {}
+    updates = []
+
+    def scheduler_factory(source, on_final, on_partial, on_error):
+        scheduler = RecordingScheduler()
+        schedulers[source] = scheduler
+        return scheduler
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=scheduler_factory,
+        recorder_factory=FailingMixRecorder,
+    )
+    session.subscribe(updates.append)
+    session.start()
+    mic.emit(source_chunk(CaptureSource.MIC, timestamp_ns=1))
+    system.emit(source_chunk(CaptureSource.SYSTEM, timestamp_ns=1))
+    mic.emit(source_chunk(CaptureSource.MIC, offset=4_800, timestamp_ns=1))
+    system.emit(source_chunk(CaptureSource.SYSTEM, offset=4_800, timestamp_ns=1))
+
+    assert len(schedulers[CaptureSource.MIC].submitted) == 2
+    assert len(schedulers[CaptureSource.SYSTEM].submitted) == 2
+    assert session.status().active_sources == {CaptureSource.MIC, CaptureSource.SYSTEM}
+    assert [event.detail for event in updates if isinstance(event, CaptureEvent)] == [
+        "Mix recording unavailable: mix writer failed"
+    ]
+
+
+def test_staggered_source_callbacks_produce_timestamp_aligned_mix(tmp_path):
+    class CollectingRecorder:
+        def __init__(self, *args):
+            self.mixes = []
+
+        def write(self, chunk):
+            return None
+
+        def write_mix(self, chunk):
+            self.mixes.append(chunk)
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    recorders = []
+
+    def recorder_factory(*args):
+        recorder = CollectingRecorder(*args)
+        recorders.append(recorder)
+        return recorder
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(),
+        recorder_factory=recorder_factory,
+    )
+    session.start()
+    mic.emit(source_chunk(CaptureSource.MIC, offset=100, timestamp_ns=1_000_000_000, frame_count=4))
+    system.emit(source_chunk(CaptureSource.SYSTEM, offset=200, timestamp_ns=1_000_041_667, frame_count=2))
+
+    assert len(recorders[0].mixes) == 1
+    assert recorders[0].mixes[0].frames.shape == (4, 1)

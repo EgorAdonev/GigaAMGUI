@@ -90,7 +90,8 @@ class LiveSession:
         self._active_sources: set[CaptureSource] = set()
         self._failed_sources: set[CaptureSource] = set()
         self._timelines: dict[CaptureSource, SourceTimeline] = {}
-        self._mix_inputs: dict[int, dict[CaptureSource, PcmChunk]] = {}
+        self._mix_inputs: dict[CaptureSource, list[PcmChunk]] = {}
+        self._last_mix_error_ns: int | None = None
         self._schedulers: dict[CaptureSource, AsrScheduler] = {}
         self._live_diarizers: dict[CaptureSource, object] = {}
         self._live_diarization_unavailable: set[CaptureSource] = set()
@@ -149,6 +150,7 @@ class LiveSession:
             for scheduler in self._schedulers.values():
                 scheduler.flush()
                 scheduler.close()
+            self._flush_mix_inputs()
             recordings = self._recorder.close()
             if self._settings.diarization_mode is DiarizationMode.AFTER_STOP:
                 self._diarize_recordings(recordings)
@@ -184,11 +186,8 @@ class LiveSession:
             )
             for aligned in timeline.ingest(chunk):
                 self._recorder.write(aligned)
-                mix_inputs = self._mix_inputs.setdefault(aligned.sample_offset, {})
-                mix_inputs[aligned.source] = aligned
-                if {CaptureSource.MIC, CaptureSource.SYSTEM} <= mix_inputs.keys():
-                    self._recorder.write_mix(AlignedMixer().mix(mix_inputs))
-                    del self._mix_inputs[aligned.sample_offset]
+                self._mix_inputs.setdefault(aligned.source, []).append(aligned)
+                self._write_ready_mixes()
                 audio = normalize_window_audio(aligned.frames[:, 0], aligned.sample_rate, self._settings.asr_sample_rate)
                 offset = round(aligned.sample_offset * self._settings.asr_sample_rate / aligned.sample_rate)
                 self._schedulers[aligned.source].submit(
@@ -205,6 +204,33 @@ class LiveSession:
                 self._session_dir,
                 {"active_sources": sorted(source.value for source in self._active_sources)},
             )
+
+    def _write_ready_mixes(self) -> None:
+        while self._active_sources and all(self._mix_inputs.get(source) for source in self._active_sources):
+            inputs = {source: self._mix_inputs[source].pop(0) for source in self._active_sources}
+            self._write_mix(inputs)
+
+    def _flush_mix_inputs(self) -> None:
+        pending = [chunk for chunks in self._mix_inputs.values() for chunk in chunks]
+        self._mix_inputs.clear()
+        for chunk in sorted(pending, key=lambda item: item.timestamp_ns):
+            self._write_mix({chunk.source: chunk})
+
+    def _write_mix(self, chunks: Mapping[CaptureSource, PcmChunk]) -> None:
+        try:
+            self._recorder.write_mix(AlignedMixer().mix(chunks))
+        except Exception as exc:
+            timestamp_ns = min(chunk.timestamp_ns for chunk in chunks.values())
+            if self._last_mix_error_ns is None or timestamp_ns - self._last_mix_error_ns >= 5_000_000_000:
+                self._last_mix_error_ns = timestamp_ns
+                source = next(iter(chunks))
+                self._notify(CaptureEvent(
+                    CaptureEventKind.STATUS,
+                    source,
+                    0,
+                    timestamp_ns,
+                    f"Mix recording unavailable: {exc}",
+                ))
 
     def _on_event(self, event: CaptureEvent) -> None:
         with self._lock:

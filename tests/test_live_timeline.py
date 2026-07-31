@@ -87,3 +87,52 @@ def test_mixer_applies_gains_and_clips_to_audio_range():
     )
 
     assert mixed.frames.tolist() == [[1.0], [-1.0]]
+
+
+def test_mixer_aligns_staggered_timestamped_chunks_and_pads_silence():
+    mixer = AlignedMixer()
+
+    mixed = mixer.mix(
+        {
+            CaptureSource.MIC: PcmChunk(
+                CaptureSource.MIC, 4, 1, 100,
+                np.full((4, 1), 0.25, dtype=np.float32), 10_000_000_000,
+            ),
+            CaptureSource.SYSTEM: PcmChunk(
+                CaptureSource.SYSTEM, 4, 1, 200,
+                np.full((2, 1), 0.5, dtype=np.float32), 10_500_000_000,
+            ),
+        }
+    )
+
+    assert mixed.timestamp_ns == 10_000_000_000
+    assert mixed.frames.tolist() == [[0.25], [0.25], [0.75], [0.75]]
+
+
+def test_mixer_normalizes_format_and_frame_count_before_mixing():
+    mixer = AlignedMixer()
+
+    mixed = mixer.mix(
+        {
+            CaptureSource.MIC: PcmChunk(
+                CaptureSource.MIC, 4, 1, 0,
+                np.full((4, 1), 0.25, dtype=np.float32), 1,
+            ),
+            CaptureSource.SYSTEM: PcmChunk(
+                CaptureSource.SYSTEM, 2, 2, 0,
+                np.full((2, 2), 0.5, dtype=np.float32), 1,
+            ),
+        }
+    )
+
+    assert mixed.sample_rate == 4
+    assert mixed.channels == 1
+    assert mixed.frames.shape == (4, 1)
+    assert np.allclose(mixed.frames, 0.75)
+
+
+def test_mixer_treats_missing_source_as_silence():
+    mixed = AlignedMixer().mix({CaptureSource.MIC: chunk(12, [0.25, -0.25])})
+
+    assert mixed.sample_offset == 12
+    assert mixed.frames.tolist() == [[0.25], [-0.25]]
