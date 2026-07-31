@@ -73,6 +73,28 @@ def test_specialized_environment_override_wins_over_data_dir(tmp_path, monkeypat
     assert os.environ["TRANSFORMERS_CACHE"] == str(explicit_hf / "hub")
 
 
+def test_bundled_snapshot_is_not_overridden_by_selected_data_dir(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundle"
+    snapshot = (
+        bundled
+        / "models"
+        / "hf"
+        / "hub"
+        / "models--istupakov--gigaam-v3-onnx"
+        / "snapshots"
+        / "abc"
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(data_paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(data_paths.sys, "executable", str(bundled / "GigaAMTranscriber"))
+
+    layout = data_paths.apply_data_dir(tmp_path / "selected", force_specialized=True)
+
+    assert layout.onnx_model_dir.is_dir()
+    assert "ONNX_MODEL_DIR" not in os.environ
+
+
 def test_command_line_data_dir_has_priority_over_environment_and_saved_choice(tmp_path, monkeypatch):
     saved = tmp_path / "saved"
     env = tmp_path / "env"

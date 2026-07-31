@@ -228,6 +228,50 @@ class I18nMixin:
                 self._llm_settings_buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить" if is_ru else "Save")
                 self._llm_settings_buttons.button(QDialogButtonBox.StandardButton.Close).setText("Закрыть" if is_ru else "Close")
                 self._update_llm_provider_fields(self.combo_llm_provider.currentText())
+        if hasattr(self, "grp_live_source"):
+            self.grp_live_source.setTitle("1. Захват в реальном времени" if is_ru else "1. Live capture")
+            self.grp_live_output.setTitle("2. Папка сессий" if is_ru else "2. Session folder")
+            self.grp_live_exports.setTitle("3. Форматы вывода" if is_ru else "3. Output formats")
+            self.lbl_live_source.setText("Источник:" if is_ru else "Source:")
+            self.lbl_live_mic_device.setText("Микрофон:" if is_ru else "Microphone:")
+            self.lbl_live_system_device.setText("Системный звук:" if is_ru else "System audio:")
+            self.lbl_live_tracks.setText("Дорожки:" if is_ru else "Tracks:")
+            self.lbl_live_diarization.setText("Диаризация:" if is_ru else "Diarization:")
+            self.lbl_live_gain.setText("Усиление:" if is_ru else "Gain:")
+            self.btn_live_output_select.setText("Выбрать папку" if is_ru else "Choose folder")
+            self.cb_live_mic_audio.setText("Записывать дорожку микрофона" if is_ru else "Record microphone track")
+            self.cb_live_system_audio.setText("Записывать дорожку системного звука" if is_ru else "Record system audio track")
+            self.cb_live_export_txt.setText("Текст (.txt)" if is_ru else "Text (.txt)")
+            self.cb_live_export_txt_timecodes.setText("Таймкоды (_timecodes.txt)" if is_ru else "Timecodes (_timecodes.txt)")
+            self.cb_live_export_txt_diarize.setText("Диаризация (_diarize.txt)" if is_ru else "Diarization (_diarize.txt)")
+            self.cb_live_export_txt_diarize_timecodes.setText("Диар.+тайм. (_diarize_timecodes.txt)" if is_ru else "Diarization+timecodes (_diarize_timecodes.txt)")
+            self.cb_live_export_md.setText("Markdown (.md)")
+            self.cb_live_export_srt.setText("SRT (.srt)")
+            self.cb_live_export_vtt.setText("VTT (.vtt)")
+            self.cb_live_subtitle_sentence_split.setText("Разбивать по предложениям" if is_ru else "Split by sentences")
+            self.lbl_live_subtitle_max_lines.setText("Строк:" if is_ru else "Lines:")
+            self.lbl_live_subtitle_max_width.setText("Символов:" if is_ru else "Characters:")
+            self.btn_live_pause.setText("Пауза" if is_ru else "Pause")
+            self.btn_live_stop.setText("Остановить" if is_ru else "Stop")
+            self.btn_live_clear.setText("Очистить" if is_ru else "Clear")
+            self.btn_live_overlay.setText("Оверлей" if is_ru else "Overlay")
+            source_labels = (("Микрофон", "Microphone"), ("Системный звук", "System audio"), ("Микрофон + системный звук", "Microphone + system audio"))
+            for index, labels in enumerate(source_labels):
+                self.combo_live_source.setItemText(index, labels[0] if is_ru else labels[1])
+            diarization_labels = (("Выключено", "Off"), ("Оценка в реальном времени", "Live estimate"), ("После остановки", "After stop"))
+            for index, labels in enumerate(diarization_labels):
+                self.combo_live_diarization.setItemText(index, labels[0] if is_ru else labels[1])
+            self.combo_live_diarization.setToolTip(
+                "Оценки анонимны и могут меняться в последние 10 секунд."
+                if is_ru else "Live estimates are anonymous and may change during the most recent 10 seconds."
+            )
+            self.live_transcript.setPlaceholderText(
+                "Здесь появятся расшифровка и сообщения о состоянии."
+                if is_ru else "Transcript and capture status will appear here."
+            )
+            self._update_live_output_folder_label(self.live_output_dir.text())
+            self._update_live_export_controls()
+            self._update_live_control_state()
         if hasattr(self, "_menu_file"):
             self._menu_file.setTitle("Файл" if is_ru else "File")
             self._menu_view.setTitle("Вид" if is_ru else "View")

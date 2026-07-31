@@ -12,9 +12,11 @@ OpenCode/Pi/Other всегда строги к пустому ответу (об
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from src.utils.llm_client import LLMClient, LLMSettings
@@ -38,6 +40,38 @@ class EmptyLLMResponse(RuntimeError):
         self.tool = tool
 
 
+class LLMCancelled(RuntimeError):
+    """Пользователь отменил текущий запрос LLM."""
+
+
+def _run_command(command: list[str], *, input_text: str | None = None, cancel_check=None):
+    if cancel_check is None:
+        return subprocess.run(command, input=input_text, capture_output=True, text=True, timeout=_TIMEOUT)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    first_input = input_text
+    while True:
+        if cancel_check():
+            process.terminate()
+            try:
+                process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+            raise LLMCancelled()
+        try:
+            stdout, stderr = process.communicate(input=first_input, timeout=0.1)
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            first_input = None
+            time.sleep(0.01)
+
+
 def build_prompt_text(transcript_text: str, prompt: str) -> str:
     return (
         "Ты обрабатываешь транскрипт на русском языке. "
@@ -52,6 +86,7 @@ def _run_api(
     transcript_text: str,
     prompt: str,
     on_stream_chunk=None,
+    cancel_check=None,
 ) -> str:
     client = LLMClient(LLMSettings(
         api_url=settings["api_url"],
@@ -59,17 +94,20 @@ def _run_api(
         model=settings["model"],
         temperature=settings["temperature"],
     ))
-    return client.process_transcript(transcript_text, prompt, stream_callback=on_stream_chunk)
+    kwargs = {"stream_callback": on_stream_chunk}
+    if cancel_check is not None:
+        kwargs["cancel_check"] = cancel_check
+    return client.process_transcript(transcript_text, prompt, **kwargs)
 
 
-def _run_claude(settings: dict, prompt_text: str, strict_empty: bool) -> str:
+def _run_claude(settings: dict, prompt_text: str, strict_empty: bool, cancel_check=None) -> str:
     command = [settings["claude_path"], "-p", "--output-format", "text"]
     if settings.get("model"):
         command += ["--model", settings["model"]]
     if settings.get("claude_args"):
         command += shlex.split(settings["claude_args"])
     command.append(prompt_text)
-    result = subprocess.run(command, capture_output=True, text=True, timeout=_TIMEOUT)
+    result = _run_command(command, cancel_check=cancel_check)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "Claude Code завершился с ошибкой").strip())
     answer = (result.stdout or "").strip()
@@ -78,22 +116,27 @@ def _run_claude(settings: dict, prompt_text: str, strict_empty: bool) -> str:
     return answer
 
 
-def _run_codex(settings: dict, prompt_text: str, strict_empty: bool) -> str:
+def _run_codex(settings: dict, prompt_text: str, strict_empty: bool, cancel_check=None) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         output_path = tmp.name
     try:
-        command = [settings["codex_path"], "exec", "-o", output_path]
-        if settings.get("model"):
-            command += ["-m", settings["model"]]
+        command = [settings["codex_path"], "exec", "--json", "-o", output_path]
+        if settings.get("codex_model"):
+            command += ["-m", settings["codex_model"]]
         if settings.get("codex_args"):
             command += shlex.split(settings["codex_args"])
         command.append("-")
-        result = subprocess.run(
-            command, input=prompt_text, capture_output=True, text=True, timeout=_TIMEOUT,
-        )
+        result = _run_command(command, input_text=prompt_text, cancel_check=cancel_check)
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "Codex завершился с ошибкой").strip())
-        answer = Path(output_path).read_text(encoding="utf-8").strip()
+            diagnostic = " ".join((result.stderr or result.stdout or "").split())
+            detail = f": {diagnostic[:300]}" if diagnostic else ""
+            raise RuntimeError(
+                f"Codex failed (exit {result.returncode}){detail}. "
+                "Run 'codex login' and check Codex settings."
+            )
+        answer = _codex_agent_message(result.stdout)
+        if not answer:
+            answer = Path(output_path).read_text(encoding="utf-8").strip()
         if not answer and strict_empty:
             raise EmptyLLMResponse("Codex")
         return answer
@@ -104,8 +147,22 @@ def _run_codex(settings: dict, prompt_text: str, strict_empty: bool) -> str:
             pass
 
 
-def _run_generic(command: list[str], error_name: str) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=_TIMEOUT)
+def _codex_agent_message(output: str | None) -> str:
+    for line in (output or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item", {})
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    return ""
+
+
+def _run_generic(command: list[str], error_name: str, cancel_check=None) -> str:
+    result = _run_command(command, cancel_check=cancel_check)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or f"{error_name} завершился с ошибкой").strip())
     answer = (result.stdout or "").strip()
@@ -152,19 +209,20 @@ def run_provider(
     provider: str,
     strict_empty_cli: bool,
     on_stream_chunk=None,
+    cancel_check=None,
 ) -> str:
     """Запускает LLM-провайдера. `provider` — уже нормализованное каноническое имя."""
     if provider == "API":
-        return _run_api(llm_settings, transcript_text, prompt, on_stream_chunk)
+        return _run_api(llm_settings, transcript_text, prompt, on_stream_chunk, cancel_check)
     prompt_text = build_prompt_text(transcript_text, prompt)
     if provider == "Claude Code":
-        return _run_claude(llm_settings, prompt_text, strict_empty_cli)
+        return _run_claude(llm_settings, prompt_text, strict_empty_cli, cancel_check)
     if provider == "Codex":
-        return _run_codex(llm_settings, prompt_text, strict_empty_cli)
+        return _run_codex(llm_settings, prompt_text, strict_empty_cli, cancel_check)
     if provider == "OpenCode":
-        return _run_generic(_opencode_command(llm_settings, prompt_text), "OpenCode")
+        return _run_generic(_opencode_command(llm_settings, prompt_text), "OpenCode", cancel_check)
     if provider == "Pi":
-        return _run_generic(_pi_command(llm_settings, prompt_text), "Pi")
+        return _run_generic(_pi_command(llm_settings, prompt_text), "Pi", cancel_check)
     if provider == "Other":
-        return _run_generic(_other_command(llm_settings, prompt_text), "Внешний CLI")
+        return _run_generic(_other_command(llm_settings, prompt_text), "Внешний CLI", cancel_check)
     raise UnknownLLMProvider(provider)

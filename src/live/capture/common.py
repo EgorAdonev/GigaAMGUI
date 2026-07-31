@@ -22,6 +22,8 @@ class NativeCaptureApi(Protocol):
 
     def pause(self) -> None: ...
 
+    def resume(self) -> None: ...
+
     def stop(self) -> None: ...
 
     def set_error_handler(self, handler: Callable[[Exception], None]) -> None: ...
@@ -80,6 +82,10 @@ class SoundDeviceCapture:
     def pause(self) -> None:
         if self._stream is not None:
             self._stream.stop()
+
+    def resume(self) -> None:
+        if self._stream is not None:
+            self._stream.start()
 
     def stop(self) -> None:
         if self._stream is not None:
@@ -151,6 +157,15 @@ class QueuedCaptureAdapter:
     def pause(self) -> None:
         self._paused.set()
         self._native_api().pause()
+
+    def resume(self) -> None:
+        if not self._paused.is_set():
+            return
+        resume = getattr(self._native_api(), "resume", None)
+        if not callable(resume):
+            raise RuntimeError("native capture adapter cannot resume")
+        resume()
+        self._paused.clear()
 
     def stop(self) -> None:
         if self._worker is None:

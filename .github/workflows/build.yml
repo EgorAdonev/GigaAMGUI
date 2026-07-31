@@ -258,6 +258,7 @@ jobs:
         shell: bash
         timeout-minutes: 20
         env:
+          GIGAAM_DATA_DIR: ${{ runner.temp }}/gigaam_offline/data
           GIGAAM_RUNTIME_DIR: ${{ runner.temp }}/gigaam_offline
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
@@ -421,7 +422,8 @@ jobs:
 
           # Тот же гейт, что и для портативных сборок: модели обязаны найтись
           # рядом с .app, без обращения к сети.
-          env GIGAAM_RUNTIME_DIR="${RUNNER_TEMP}/gigaam_offline" \
+          env GIGAAM_DATA_DIR="${RUNNER_TEMP}/gigaam_offline/data" \
+              GIGAAM_RUNTIME_DIR="${RUNNER_TEMP}/gigaam_offline" \
               HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
               offline/GigaAMTranscriber.app/Contents/MacOS/GigaAMTranscriber \
               --offline-models-smoke

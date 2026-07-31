@@ -270,6 +270,15 @@ class ModelLoader:
             # сессию и показывал её provider в диагностике.
             self._sync_from_backend()
 
+    def transcribe_window(self, audio, sample_rate: int, offset_samples: int):
+        """Decode an in-memory live-ASR window with the active backend."""
+        if self._backend is None or not self._backend.is_loaded():
+            raise RuntimeError("Модель не загружена")
+        try:
+            return self._backend.transcribe_window(audio, sample_rate, offset_samples)
+        finally:
+            self._sync_from_backend()
+
     def unload(self):
         """Выгружает модель и освобождает память."""
         if self._backend is not None:

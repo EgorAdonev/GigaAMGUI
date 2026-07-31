@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections import deque
-
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from ..live.types import TranscriptEvent
+from .live_transcript import LiveTranscriptPresenter
 
 
 class _DragHandle(QFrame):
@@ -40,6 +39,7 @@ class LiveOverlay(QWidget):
     """Small movable window that keeps final and partial text visible."""
 
     question_submitted = pyqtSignal(str)
+    cancel_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -48,7 +48,9 @@ class LiveOverlay(QWidget):
         self.setWindowTitle("Live transcription")
         self.setMinimumWidth(360)
         self.resize(480, 240)
-        self._final_lines: deque[str] = deque(maxlen=4)
+        self._transcript_presenter = LiveTranscriptPresenter()
+        self._conversation: list[tuple[str, str]] = []
+        self._active_question: str | None = None
 
         glass = QFrame()
         glass.setObjectName("liveGlass")
@@ -91,6 +93,7 @@ class LiveOverlay(QWidget):
         content_layout.setSpacing(7)
         self.final_text = QTextEdit()
         self.final_text.setReadOnly(True)
+        self.final_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.final_text.setMinimumHeight(112)
         content_layout.addWidget(self.final_text)
         self.partial_label = QLabel()
@@ -125,21 +128,32 @@ class LiveOverlay(QWidget):
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._submit_question)
         question_layout.addWidget(self.send_button)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_generation)
+        self.cancel_button.hide()
+        question_layout.addWidget(self.cancel_button)
         content_layout.addLayout(question_layout)
         layout.addWidget(self.content)
 
     def update_transcript(self, event: TranscriptEvent) -> None:
         if event.status == "final":
-            metadata = " · ".join(filter(None, (event.source_label, event.speaker)))
-            seconds = event.sample_start / 16_000
-            minutes, seconds = divmod(seconds, 60)
-            timestamp = f"[{int(minutes):02d}:{seconds:06.3f}]"
-            line = f"{timestamp} {metadata}: {event.text}" if metadata else f"{timestamp} {event.text}"
-            self._final_lines.append(line)
-            self.final_text.setPlainText("\n".join(self._final_lines))
+            self._transcript_presenter.add_final(event)
+            self._render_final_text()
             self.partial_label.clear()
         elif event.status == "partial":
             self.partial_label.setText(event.text)
+
+    def clear_transcript(self) -> None:
+        self._transcript_presenter.clear()
+        self.final_text.clear()
+        self.partial_label.clear()
+
+    def _render_final_text(self) -> None:
+        scrollbar = self.final_text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
+        position = scrollbar.value()
+        self.final_text.setPlainText(self._transcript_presenter.rendered_paragraphs())
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
 
     def toggle_collapsed(self) -> None:
         collapsed = self.content.isVisible()
@@ -148,10 +162,56 @@ class LiveOverlay(QWidget):
         self.adjustSize()
 
     def set_answer(self, text: str) -> None:
-        self.answer_text.setPlainText(text)
+        if self._active_question is None:
+            self.answer_text.setPlainText(text)
+        else:
+            self._conversation[-1] = (self._active_question, text)
+            self._render_conversation()
         self.answer_card.show()
         self.answer_toggle_button.setText("Hide answer")
         self.adjustSize()
+
+    def append_answer(self, text: str) -> None:
+        if self._active_question is None:
+            self.set_answer(text)
+            return
+        question, answer = self._conversation[-1]
+        self._conversation[-1] = (question, text if answer == "Generating..." else answer + text)
+        self._render_conversation()
+
+    def finish_generation(self) -> None:
+        self._active_question = None
+        self.cancel_button.hide()
+        self.send_button.setEnabled(True)
+
+    def _begin_question(self, question: str) -> None:
+        self._active_question = question
+        self._conversation.append((question, "Generating..."))
+        self._render_conversation()
+        self.answer_card.show()
+        self.answer_toggle_button.setText("Hide answer")
+        self.send_button.setEnabled(False)
+        self.cancel_button.show()
+        self.adjustSize()
+
+    def _cancel_generation(self) -> None:
+        if self._active_question is None:
+            return
+        question, _answer = self._conversation[-1]
+        self._conversation[-1] = (question, "")
+        self._active_question = None
+        self._render_conversation()
+        self.cancel_button.hide()
+        self.send_button.setEnabled(True)
+        self.cancel_requested.emit()
+
+    def _render_conversation(self) -> None:
+        self.answer_text.setPlainText(
+            "\n\n".join(
+                f"You: {question}" + (f"\nAssistant: {answer}" if answer else "")
+                for question, answer in self._conversation
+            )
+        )
 
     def toggle_answer_visibility(self) -> None:
         visible = self.answer_card.isVisible()
@@ -164,7 +224,7 @@ class LiveOverlay(QWidget):
         if not question:
             return
         self.question_input.clear()
-        self.set_answer("Thinking...")
+        self._begin_question(question)
         self.question_submitted.emit(question)
 
     def closeEvent(self, event: QCloseEvent) -> None:

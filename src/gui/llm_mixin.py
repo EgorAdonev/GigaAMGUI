@@ -51,14 +51,21 @@ class LlmMixin:
         transcript_text: str,
         prompt: str,
         on_stream_chunk=None,
+        cancel_check=None,
     ) -> str:
         raw = llm_settings.get("provider", "API")
         provider = "Other" if self._normalize_llm_provider(raw) == "Other" else raw
         try:
+            kwargs = {
+                "provider": provider,
+                "strict_empty_cli": True,
+                "on_stream_chunk": on_stream_chunk,
+            }
+            if cancel_check is not None:
+                kwargs["cancel_check"] = cancel_check
             return llm_service.run_provider(
                 llm_settings, transcript_text, prompt,
-                provider=provider, strict_empty_cli=True,
-                on_stream_chunk=on_stream_chunk,
+                **kwargs,
             )
         except llm_service.UnknownLLMProvider as exc:
             raise RuntimeError(self._t(

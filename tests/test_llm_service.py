@@ -93,6 +93,58 @@ def test_claude_error_returncode_raises(monkeypatch):
         )
 
 
+def test_codex_uses_json_output_without_a_shared_model_and_reads_agent_message(monkeypatch):
+    captured = {}
+
+    def fake_run(command, *args, **kwargs):
+        captured["command"] = command
+        output_path = command[command.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as output:
+            output.write("fallback answer")
+        return _Proc(
+            0,
+            '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}\n',
+            "Codex startup progress",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = llm_service.run_provider(
+        {"codex_path": "codex", "model": "shared-api-model"},
+        "T", "P", provider="Codex", strict_empty_cli=True,
+    )
+
+    assert result == "final answer"
+    assert captured["command"][:4] == ["codex", "exec", "--json", "-o"]
+    assert "-m" not in captured["command"]
+    assert captured["command"][-1] == "-"
+
+
+def test_codex_uses_output_file_when_json_has_no_agent_message(monkeypatch):
+    def fake_run(command, *args, **kwargs):
+        output_path = command[command.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as output:
+            output.write("  file answer  ")
+        return _Proc(0, '{"type":"thread.started"}\n', "progress banner")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = llm_service.run_provider(
+        {"codex_path": "codex"}, "T", "P", provider="Codex", strict_empty_cli=True,
+    )
+
+    assert result == "file answer"
+
+
+def test_codex_failure_surfaces_concise_actionable_diagnostics(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: _Proc(2, "", "authentication failed"))
+
+    with pytest.raises(RuntimeError, match=r"Codex failed \(exit 2\).*codex login"):
+        llm_service.run_provider(
+            {"codex_path": "codex"}, "T", "P", provider="Codex", strict_empty_cli=True,
+        )
+
+
 def test_opencode_empty_always_strict(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0, "", ""))
     with pytest.raises(llm_service.EmptyLLMResponse):
@@ -118,3 +170,34 @@ def test_opencode_command_shape(monkeypatch):
     assert "--flag" in captured["cmd"] and "x" in captured["cmd"]
     # последний аргумент — собранный prompt
     assert captured["cmd"][-1] == llm_service.build_prompt_text("T", "P")
+
+
+def test_cancelled_cli_provider_terminates_its_subprocess(monkeypatch):
+    class HangingProcess:
+        returncode = None
+
+        def __init__(self):
+            self.terminated = False
+
+        def communicate(self, timeout=None):
+            if self.terminated:
+                return "", ""
+            raise subprocess.TimeoutExpired("opencode", timeout)
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.terminate()
+
+    process = HangingProcess()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(llm_service.LLMCancelled):
+        llm_service.run_provider(
+            {"opencode_path": "opencode"}, "t", "p", provider="OpenCode",
+            strict_empty_cli=True, cancel_check=lambda: True,
+        )
+
+    assert process.terminated is True

@@ -70,6 +70,7 @@ class LLMClient:
         prompt: str,
         system_prompt: str | None = None,
         stream_callback: Callable[[str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> str:
         transcript = (transcript_text or "").strip()
         if not transcript:
@@ -81,8 +82,8 @@ class LLMClient:
 
         api_kind = self._detect_api_kind(self.settings.api_url)
         if api_kind == "anthropic":
-            return self._process_anthropic(transcript, user_prompt, system_prompt, stream_callback)
-        return self._process_openai(transcript, user_prompt, system_prompt, stream_callback)
+            return self._process_anthropic(transcript, user_prompt, system_prompt, stream_callback, cancel_check)
+        return self._process_openai(transcript, user_prompt, system_prompt, stream_callback, cancel_check)
 
     def _process_openai(
         self,
@@ -90,6 +91,7 @@ class LLMClient:
         user_prompt: str,
         system_prompt: str | None,
         stream_callback: Callable[[str], None] | None,
+        cancel_check: Callable[[], bool] | None,
     ) -> str:
         endpoint = self._build_openai_endpoint(self.settings.api_url)
         headers = {
@@ -121,6 +123,9 @@ class LLMClient:
             response.raise_for_status()
             parts = []
             for line in response.iter_lines(decode_unicode=True):
+                if cancel_check and cancel_check():
+                    response.close()
+                    raise RuntimeError("LLM request cancelled")
                 if not line or not line.startswith("data: "):
                     continue
                 data = line[6:]
@@ -149,6 +154,7 @@ class LLMClient:
         user_prompt: str,
         system_prompt: str | None,
         stream_callback: Callable[[str], None] | None,
+        cancel_check: Callable[[], bool] | None,
     ) -> str:
         endpoint = self._build_anthropic_endpoint(self.settings.api_url)
         headers = {
@@ -179,6 +185,9 @@ class LLMClient:
             response.raise_for_status()
             parts = []
             for line in response.iter_lines(decode_unicode=True):
+                if cancel_check and cancel_check():
+                    response.close()
+                    raise RuntimeError("LLM request cancelled")
                 if not line or not line.startswith("data: "):
                     continue
                 event = json.loads(line[6:])

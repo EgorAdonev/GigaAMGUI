@@ -105,6 +105,8 @@ def apply_data_dir(
         # Проверяем root до изменения процесса: нерабочий путь не должен
         # оставить частично переключённое окружение.
         ensure_data_layout(layout)
+    from .utils.runtime_manager import bundled_hf_cache_dir
+
     values = {
         DATA_DIR_ENV: layout.root,
         "GIGAAM_RUNTIME_DIR": layout.runtime_dir,
@@ -112,9 +114,12 @@ def apply_data_dir(
         "HF_HOME": layout.huggingface_dir,
         "TORCH_HOME": layout.torch_home,
         "NEMO_HOME": layout.nemo_home,
-        "ONNX_MODEL_DIR": layout.onnx_model_dir,
         "GIGAAM_DEEPFILTER_DIR": layout.deepfilter_dir,
     }
+    # Офлайн-сборка читает готовые ONNX snapshots рядом с бинарником. Передача
+    # пустого user-каталога как явного model_dir отключает этот поиск.
+    if bundled_hf_cache_dir() is None:
+        values["ONNX_MODEL_DIR"] = layout.onnx_model_dir
     for key, value in values.items():
         if key == DATA_DIR_ENV or force_specialized or key not in os.environ:
             os.environ[key] = str(value)

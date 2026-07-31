@@ -16,6 +16,7 @@ Russian speech-to-text transcription for audio and video powered by **GigaAM-v3*
 
 - [Features](#features)
 - [Quick start](#quick-start)
+- [Live desktop](#live-desktop)
 - [Interfaces](#interfaces)
 - [Configuration](#configuration)
 - [Intelligent audio preprocessing](#intelligent-audio-preprocessing)
@@ -77,6 +78,30 @@ Recording** permission for system audio. ScreenCaptureKit requires macOS 13 or
 newer. Linux does not create a monitor source: enable PipeWire-Pulse or PulseAudio
 and confirm an input device named `Monitor` is available. Missing dependencies,
 permissions, or monitor sources report an error and do not create an audio track.
+
+## Live desktop
+
+The Desktop GUI's Live tab captures the microphone, system audio, or both sources
+at once; each source has its own device selection. It can save `mic.wav` and
+`system.wav` independently and, when both sources are captured, `mix.wav` as well.
+After the session stops, it can export `txt`, `txt_timecodes`, `txt_diarize`,
+`txt_diarize_timecodes`, `md`, `srt`, and `vtt`.
+
+Diarization is selectable as off, anonymous live estimates, or after-stop
+processing. Live estimates can change during the most recent 10 seconds; when
+live diarization is unavailable, source labels are retained. After-stop mode adds
+offline speaker labels to the recorded tracks.
+
+The **Overlay** button opens a floating, always-on-top window with final and
+partial transcript text. It accepts LLM questions using final events from the
+current session as context and can cancel answer generation.
+
+Live capture is supported on Windows, macOS, and Linux. On Windows, install
+`requirements-live-windows.txt` (PyAudioWPatch). On macOS 13+, microphone capture
+requires `requirements-live-macos.txt` and Microphone permission; system audio also
+requires Screen Recording permission and ScreenCaptureKit. On Linux, install
+`requirements-live-linux.txt`; system audio is available only through an existing
+PipeWire/PulseAudio monitor source, which the application does not create.
 
 ### Optional: NVIDIA Sortformer
 
@@ -314,7 +339,9 @@ Each release provides two variants:
   selected device/provider, then downloads only missing artifacts;
 - `*-offline.zip` includes the base ONNX ASR, VAD, and
   Pyannote+WeSpeaker diarization chain in a read-only `models` directory next to
-  the executable.
+  the executable. Selecting `GIGAAM_DATA_DIR` still keeps these bundled
+  snapshots in use; it only places writable downloads and runtime data on the
+  selected drive.
 
 Sortformer, multilingual/MLX models, and gated pyannote models not present in
 the offline bundle are downloaded to the writable user cache when selected and

@@ -27,6 +27,10 @@ class NoOpCaptureAdapter:
     def pause(self) -> None:
         self.is_paused = True
 
+    def resume(self) -> None:
+        if self.is_started:
+            self.is_paused = False
+
     def stop(self) -> None:
         self.is_started = False
         self.is_paused = False

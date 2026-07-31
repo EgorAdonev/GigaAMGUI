@@ -51,6 +51,23 @@ def test_overlay_displays_recent_final_lines_partial_and_metadata(overlay):
     assert overlay.partial_label.text() == "Still listening"
 
 
+def test_overlay_keeps_long_history_and_preserves_manual_scroll_position(overlay, qapp):
+    assert overlay.final_text.verticalScrollBarPolicy() is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    for number in range(30):
+        overlay.update_transcript(_event(f"Final line {number}"))
+    qapp.processEvents()
+    scrollbar = overlay.final_text.verticalScrollBar()
+
+    assert "Final line 0" in overlay.final_text.toPlainText()
+    scrollbar.setValue(0)
+    overlay.update_transcript(_event("Newest line"))
+    assert scrollbar.value() == 0
+
+    scrollbar.setValue(scrollbar.maximum())
+    overlay.update_transcript(_event("Following newest"))
+    assert scrollbar.value() == scrollbar.maximum()
+
+
 def test_overlay_collapses_hides_and_can_be_dragged(overlay):
     assert overlay.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert overlay.windowFlags() & Qt.WindowType.FramelessWindowHint
@@ -78,9 +95,29 @@ def test_overlay_submits_questions_and_hides_answer_card(overlay):
 
     overlay.set_answer("The deadline is Friday.")
     assert questions == ["What was agreed?"]
-    assert overlay.answer_text.toPlainText() == "The deadline is Friday."
+    assert overlay.answer_text.toPlainText() == (
+        "You: What was agreed?\nAssistant: The deadline is Friday."
+    )
     assert overlay.answer_card.isVisible() is True
 
     overlay.toggle_answer_visibility()
     assert overlay.answer_card.isVisible() is False
     assert overlay.answer_toggle_button.text() == "Show answer"
+
+
+def test_overlay_keeps_submitted_question_and_can_cancel_generation(overlay):
+    cancelled = []
+    overlay.cancel_requested.connect(lambda: cancelled.append(True))
+
+    overlay.question_input.setText("What was agreed?")
+    overlay.send_button.click()
+
+    assert "What was agreed?" in overlay.answer_text.toPlainText()
+    assert "Generating" in overlay.answer_text.toPlainText()
+    assert overlay.cancel_button.isVisible() is True
+    overlay.cancel_button.click()
+
+    assert cancelled == [True]
+    assert "What was agreed?" in overlay.answer_text.toPlainText()
+    assert "Generating" not in overlay.answer_text.toPlainText()
+    assert overlay.cancel_button.isVisible() is False

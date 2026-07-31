@@ -196,7 +196,7 @@ class GigaTranscriberQtApp(
         self.signals.llm_response_ready.connect(self._on_llm_response_ready)
         self.signals.llm_stream_chunk.connect(self._on_llm_stream_chunk)
         self.signals.live_status.connect(self._update_live_status)
-        self.signals.live_event.connect(self._update_live_overlay)
+        self.signals.live_event.connect(self._update_live_event)
         self.signals.live_finished.connect(self._on_live_finished)
         self.signals.live_answer.connect(self._update_live_answer)
 

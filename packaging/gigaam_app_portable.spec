@@ -16,9 +16,10 @@ import sys
 from PyInstaller.utils.hooks import collect_all
 
 sys.path.insert(0, os.path.abspath(SPECPATH))
-from _spec_common import collect_onnx_runtime_deps, collect_pure_runtime_deps, collect_static_package
+from _spec_common import collect_live_capture_deps, collect_onnx_runtime_deps, collect_pure_runtime_deps, collect_static_package
 runtime_d, runtime_b, runtime_h = collect_pure_runtime_deps()
 onnx_d, onnx_b, onnx_h = collect_onnx_runtime_deps()
+live_d, live_b, live_h = collect_live_capture_deps()
 
 block_cipher = None
 
@@ -55,7 +56,7 @@ datas = list(
     transformers_d + gigaam_d + hf_d +
     safetensors_d + tokenizers_d +
     pyqt6_d + einops_d + omegaconf_d + accelerate_d + pyannote_d + lightning_d + ptl_d +
-    runtime_d + onnx_d +
+    runtime_d + onnx_d + live_d +
     [(os.path.join(project_root, 'src'), 'src'),
      (os.path.join(project_root, 'assets', 'icon.ico'), '.'),
      (os.path.join(project_root, 'licenses', 'parakeet-rs-MIT.md'), 'licenses')]
@@ -94,7 +95,7 @@ binaries = (
     transformers_b + gigaam_b + hf_b +
     safetensors_b + tokenizers_b +
     pyqt6_b + einops_b + omegaconf_b + accelerate_b + pyannote_b + lightning_b + ptl_b +
-    runtime_b + onnx_b +
+    runtime_b + onnx_b + live_b +
     _extra_bins
 )
 
@@ -102,7 +103,7 @@ hiddenimports = list(set(
     transformers_h + gigaam_h + hf_h +
     safetensors_h + tokenizers_h +
     pyqt6_h + einops_h + omegaconf_h + accelerate_h + pyannote_h + lightning_h + ptl_h +
-    runtime_h + onnx_h + [
+    runtime_h + onnx_h + live_h + [
     'gigaam',
     'transformers', 'transformers.models', 'transformers.models.auto',
     'transformers.modeling_utils', 'transformers.tokenization_utils_base',

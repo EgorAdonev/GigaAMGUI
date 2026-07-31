@@ -110,6 +110,7 @@ class TranscriptEvent:
     status: str
     speaker: str | None = None
     supersedes: int | None = None
+    paragraph_break_after: bool = False
     source_label: str = field(init=False)
 
     def __post_init__(self) -> None:

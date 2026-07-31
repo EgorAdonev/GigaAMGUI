@@ -61,6 +61,9 @@ class _ScreenCaptureKitCapture:
         self._stream: Any = None
         self._output: Any = None
         self._error_handler: Callable[[Exception], None] | None = None
+        self._resume_args: tuple[CaptureSource, str | None, Callable[..., None]] | None = None
+        self._audio_failure_count = 0
+        self._audio_failure_reported = False
 
     def devices(self, source: CaptureSource) -> list[dict[str, Any]]:
         if source is not CaptureSource.SYSTEM:
@@ -71,6 +74,9 @@ class _ScreenCaptureKitCapture:
     def start(self, source: CaptureSource, _device_id: str | None, callback: Callable[..., None]) -> None:
         if source is not CaptureSource.SYSTEM:
             raise OSError("ScreenCaptureKit only captures system audio")
+        self._resume_args = (source, _device_id, callback)
+        import objc
+
         content = self._shareable_content()
         displays = list(content.displays())
         if not displays:
@@ -84,7 +90,7 @@ class _ScreenCaptureKitCapture:
 
         class Output(self._foundation.NSObject):
             def initWithCallback_(self, output_callback: Callable[..., None]) -> Any:
-                self = super().init()
+                self = objc.super(Output, self).init()
                 if self is not None:
                     self._callback = output_callback
                 return self
@@ -107,7 +113,11 @@ class _ScreenCaptureKitCapture:
             self._raise_capture_error(error)
         completed = Event()
         result: list[Any] = []
-        self._stream.startCaptureWithCompletionHandler_(lambda start_error: (result.append(start_error), completed.set()))
+        def on_start(start_error: Any) -> None:
+            result.append(start_error)
+            completed.set()
+
+        self._stream.startCaptureWithCompletionHandler_(on_start)
         if not completed.wait(5):
             raise OSError("ScreenCaptureKit did not confirm capture startup")
         if result and result[0]:
@@ -115,6 +125,11 @@ class _ScreenCaptureKitCapture:
 
     def pause(self) -> None:
         self.stop()
+
+    def resume(self) -> None:
+        if self._resume_args is None:
+            raise RuntimeError("ScreenCaptureKit capture has not started")
+        self.start(*self._resume_args)
 
     def stop(self) -> None:
         if self._stream is not None:
@@ -128,9 +143,11 @@ class _ScreenCaptureKitCapture:
     def _shareable_content(self) -> Any:
         completed = Event()
         result: list[Any] = []
-        self._sck.SCShareableContent.getShareableContentWithCompletionHandler_(
-            lambda content, error: (result.extend((content, error)), completed.set())
-        )
+        def on_shareable_content(content: Any, error: Any) -> None:
+            result.extend((content, error))
+            completed.set()
+
+        self._sck.SCShareableContent.getShareableContentWithCompletionHandler_(on_shareable_content)
         if not completed.wait(5):
             raise OSError("ScreenCaptureKit did not return shareable content")
         if len(result) != 2 or result[1]:
@@ -140,14 +157,40 @@ class _ScreenCaptureKitCapture:
     def _deliver_audio(self, sample_buffer: Any, callback: Callable[..., None]) -> None:
         try:
             block = self._avfoundation.CMSampleBufferGetDataBuffer(sample_buffer)
-            status, _at_offset, length, data = self._coremedia.CMBlockBufferGetDataPointer(block, 0, None, None, None)
-            if status != 0 or data is None or length % 8:
-                raise OSError("ScreenCaptureKit returned an unreadable audio buffer")
-            frames = np.frombuffer(data, dtype=np.float32, count=length // 4).reshape(-1, 2)
+            if block is None:
+                return
+            length = self._coremedia.CMBlockBufferGetDataLength(block)
+            if length <= 0:
+                return
+            if length % 8:
+                raise OSError(f"ScreenCaptureKit audio buffer has invalid PCM frame size: {length} bytes")
+            status, data = self._coremedia.CMBlockBufferCopyDataBytes(block, 0, length, None)
+            if status != 0:
+                raise OSError(f"ScreenCaptureKit audio buffer copy failed (OSStatus {status})")
+            if data is None or len(data) != length:
+                actual_length = 0 if data is None else len(data)
+                raise OSError(
+                    f"ScreenCaptureKit audio buffer copy returned {actual_length} bytes; expected {length} bytes"
+                )
+            frames = np.frombuffer(data, dtype=np.float32).reshape(-1, 2)
+        except Exception as exc:
+            self._report_audio_failure(exc)
+            return
+        self._audio_failure_count = 0
+        self._audio_failure_reported = False
+        try:
             callback(frames, None, 48_000)
         except Exception as exc:
             if self._error_handler is not None:
                 self._error_handler(exc)
+
+    def _report_audio_failure(self, error: Exception) -> None:
+        self._audio_failure_count += 1
+        if self._audio_failure_count < 3 or self._audio_failure_reported:
+            return
+        self._audio_failure_reported = True
+        if self._error_handler is not None:
+            self._error_handler(error)
 
     @staticmethod
     def _raise_capture_error(error: Any) -> None:
@@ -179,3 +222,12 @@ class MacSystemAudioAdapter(_MacAdapter):
     def __init__(self, device_id: str | None = None, **kwargs: Any) -> None:
         kwargs.setdefault("api_loader", _load_macos_system_api)
         super().__init__(CaptureSource.SYSTEM, device_id, **kwargs)
+
+    def devices(self):
+        try:
+            return super().devices()
+        except ImportError as exc:
+            raise CaptureUnavailable(
+                "macOS system capture requires macOS 13+ with ScreenCaptureKit; "
+                "install requirements-live-macos.txt or select a virtual audio device."
+            ) from exc

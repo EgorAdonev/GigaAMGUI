@@ -15,6 +15,7 @@ PyInstaller НЕ видит, что они импортируют. Их чист
 """
 
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import (
     collect_all,
@@ -26,6 +27,30 @@ from PyInstaller.utils.hooks import (
 # Пакеты, которые импортирует рантайм-torchvision/pyannote, но не видит
 # замороженный анализ. Собираем целиком.
 PURE_RUNTIME_DEPS = ["PIL", "asteroid_filterbanks"]
+
+
+def collect_live_capture_deps():
+    """Collect optional native live-capture packages for target platform."""
+    if sys.platform.startswith("win"):
+        packages = ("pyaudiowpatch",)
+    elif sys.platform == "darwin":
+        packages = ("sounddevice", "AVFoundation", "CoreMedia", "ScreenCaptureKit")
+    elif sys.platform.startswith("linux"):
+        packages = ("sounddevice",)
+    else:
+        packages = ()
+
+    datas, binaries, hiddenimports = [], [], []
+    for package in packages:
+        try:
+            package_data, package_binaries, package_hiddenimports = collect_all(package)
+        except Exception as exc:
+            print(f"[skip] optional live capture package {package}: {exc}")
+            continue
+        datas += package_data
+        binaries += package_binaries
+        hiddenimports += package_hiddenimports
+    return datas, binaries, hiddenimports
 
 
 def collect_static_package(package):

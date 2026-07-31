@@ -71,6 +71,10 @@ class _PyAudioWASAPI:
         if self._stream is not None:
             self._stream.stop_stream()
 
+    def resume(self) -> None:
+        if self._stream is not None:
+            self._stream.start_stream()
+
     def stop(self) -> None:
         if self._stream is not None:
             self._stream.stop_stream()

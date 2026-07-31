@@ -43,7 +43,7 @@ class SessionResult:
 
 
 SchedulerFactory = Callable[
-    [CaptureSource, Callable[[TranscriptEvent], None], Callable[[Exception], None]], AsrScheduler
+    [CaptureSource, Callable[[TranscriptEvent], None], Callable[[TranscriptEvent], None], Callable[[Exception], None]], AsrScheduler
 ]
 
 
@@ -60,6 +60,7 @@ class LiveSession:
         export_selection: ExportSelection | None = None,
         recorder_factory: Callable[[Path, bool | set[CaptureSource], bool], SessionRecorder] = SessionRecorder,
         diarization_factory: Callable[[str], object] | None = None,
+        translate: Callable[[str, str], str] | None = None,
     ) -> None:
         self._settings = settings
         self._adapters = dict(adapters)
@@ -70,6 +71,7 @@ class LiveSession:
         )
         self._recorder_factory = recorder_factory
         self._diarization_factory = diarization_factory
+        self._translate = translate or (lambda _ru, en: en)
         self._session_dir = LiveSessionStore(root_dir).create(settings)
         self._journal = EventJournal(self._session_dir / "events.jsonl")
         self._recorder = recorder_factory(
@@ -93,6 +95,7 @@ class LiveSession:
         self._live_diarizers: dict[CaptureSource, object] = {}
         self._live_diarization_unavailable: set[CaptureSource] = set()
         self._speaker_labels: dict[tuple[CaptureSource, str], str] = {}
+        self._finalized_revisions: dict[tuple[CaptureSource, str], int] = {}
         self._subscribers: list[Callable[[TranscriptEvent | CaptureEvent | LiveStatus], None]] = []
         self._lock = RLock()
 
@@ -105,6 +108,7 @@ class LiveSession:
                 self._schedulers[source] = self._scheduler_factory(
                     source,
                     self._on_final,
+                    self._on_partial,
                     lambda error, source=source: self._on_asr_error(source, error),
                 )
                 # Native adapters can emit an asynchronous permission/device event
@@ -124,6 +128,15 @@ class LiveSession:
             for source in self._active_sources:
                 self._adapters[source].pause()
             self._state = CaptureState.PAUSED
+            self._notify_status()
+
+    def resume(self) -> None:
+        with self._lock:
+            if self._state is not CaptureState.PAUSED:
+                raise RuntimeError("only a paused session can be resumed")
+            for source in self._active_sources:
+                self._adapters[source].resume()
+            self._state = CaptureState.RECORDING
             self._notify_status()
 
     def stop(self) -> SessionResult:
@@ -202,12 +215,24 @@ class LiveSession:
     def _on_final(self, event: TranscriptEvent) -> None:
         with self._lock:
             finalized = label_event(event, self._settings.diarization_mode)
+            self._record_finalized(finalized)
             self._journal.append(finalized)
             self._notify(finalized)
             if self._settings.diarization_mode is DiarizationMode.LIVE_ESTIMATE:
                 for revised in self._estimate_live_speakers(finalized):
+                    self._record_finalized(revised)
                     self._journal.append(revised)
                     self._notify(revised)
+
+    def _on_partial(self, event: TranscriptEvent) -> None:
+        with self._lock:
+            if event.revision <= self._finalized_revisions.get((event.source, event.event_id), -1):
+                return
+            self._notify(event)
+
+    def _record_finalized(self, event: TranscriptEvent) -> None:
+        key = (event.source, event.event_id)
+        self._finalized_revisions[key] = max(event.revision, self._finalized_revisions.get(key, -1))
 
     def _estimate_live_speakers(self, event: TranscriptEvent) -> list[TranscriptEvent]:
         diarizer = self._live_diarizers.get(event.source)
@@ -249,6 +274,7 @@ class LiveSession:
                 segments = diarizer.diarize(str(path))
                 events = [event for event in self._journal.latest_events() if event.source is source]
                 for revised in self._revised_speakers(events, self._segment_speakers(events, segments)):
+                    self._record_finalized(revised)
                     self._journal.append(revised)
                     self._notify(revised)
             except Exception as exc:
@@ -294,18 +320,27 @@ class LiveSession:
 
     def _anonymous_speaker(self, source: CaptureSource, raw_speaker: str) -> str:
         key = (source, raw_speaker)
-        return self._speaker_labels.setdefault(key, f"Speaker {len(self._speaker_labels) + 1}")
+        number = len(self._speaker_labels) + 1
+        return self._speaker_labels.setdefault(
+            key,
+            self._translate(f"Спикер {number}", f"Speaker {number}"),
+        )
 
     def _report_live_diarization_unavailable(self, source: CaptureSource, detail: str) -> None:
         if source in self._live_diarization_unavailable:
             return
         self._live_diarization_unavailable.add(source)
+        guidance = self._translate(
+            "Используйте «После остановки» для офлайн-меток спикеров; "
+            "метки источников сохраняются.",
+            "Use After stop for offline speaker labels; retaining source labels.",
+        )
         self._notify(CaptureEvent(
             CaptureEventKind.STATUS,
             source,
             0,
             0,
-            f"{detail} Use After stop for offline speaker labels; retaining source labels.",
+            f"{detail} {guidance}",
         ))
 
     def _on_asr_error(self, source: CaptureSource, error: Exception) -> None:

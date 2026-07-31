@@ -146,6 +146,14 @@ def test_all_specs_use_shared_runtime_dependency_contract():
         assert "runtime_h" in text, spec
 
 
+def test_all_desktop_specs_include_platform_live_capture_dependencies():
+    for spec in PACKAGING_DIR.glob("gigaam_app*.spec"):
+        text = spec.read_text(encoding="utf-8-sig")
+
+        assert "collect_live_capture_deps" in text, spec
+        assert "live_d" in text and "live_b" in text and "live_h" in text, spec
+
+
 def test_all_specs_remain_valid_python_after_shared_contract_changes():
     for spec in PACKAGING_DIR.glob("*.spec"):
         ast.parse(spec.read_text(encoding="utf-8-sig"), filename=str(spec))

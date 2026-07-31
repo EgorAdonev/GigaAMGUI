@@ -12,10 +12,11 @@ import sys
 from PyInstaller.utils.hooks import collect_all
 
 sys.path.insert(0, os.path.abspath(SPECPATH))
-from _spec_common import collect_onnx_runtime_deps, collect_pure_runtime_deps, collect_static_package
+from _spec_common import collect_live_capture_deps, collect_onnx_runtime_deps, collect_pure_runtime_deps, collect_static_package
 
 runtime_d, runtime_b, runtime_h = collect_pure_runtime_deps()
 onnx_d, onnx_b, onnx_h = collect_onnx_runtime_deps()
+live_d, live_b, live_h = collect_live_capture_deps()
 
 block_cipher = None
 
@@ -100,6 +101,9 @@ for package in packages:
 datas += runtime_d
 binaries += runtime_b
 hiddenimports += runtime_h
+datas += live_d
+binaries += live_b
+hiddenimports += live_h
 datas += onnx_d
 binaries += onnx_b
 hiddenimports += onnx_h
@@ -222,8 +226,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "GigaAM Transcriber",
         "CFBundleDisplayName": "GigaAM Transcriber",
-        "CFBundleShortVersionString": "1.3.9",
-        "CFBundleVersion": "1.3.9",
+        "CFBundleShortVersionString": "1.3.10",
+        "CFBundleVersion": "1.3.10",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,
         "CFBundleDocumentTypes": [

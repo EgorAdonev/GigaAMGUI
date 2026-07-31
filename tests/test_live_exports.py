@@ -31,7 +31,7 @@ def test_export_is_atomic_and_uses_only_latest_final_events(tmp_path):
     )
 
     assert paths == [tmp_path / "transcript.txt"]
-    assert paths[0].read_text(encoding="utf-8") == "[00:00.000] MIC Speaker 1: one\n"
+    assert paths[0].read_text(encoding="utf-8") == "one\n"
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -47,3 +47,34 @@ def test_subtitle_exports_sort_revisions_and_renumber_cues(tmp_path):
     assert "2\n00:00:02,000 --> 00:00:03,000\n<Speaker 1> MIC: second" in srt
     assert vtt.startswith("WEBVTT\n")
     assert "00:00:00.000 --> 00:00:01.000\n<v Speaker 1>MIC: first" in vtt
+
+
+def test_live_exports_materialize_each_selected_processing_format(tmp_path):
+    paths = export_session(
+        tmp_path,
+        [event("one", 0, "one")],
+        ExportSelection(
+            txt=True,
+            txt_timecodes=True,
+            txt_diarize=True,
+            txt_diarize_timecodes=True,
+            md=True,
+            srt=True,
+            vtt=True,
+        ),
+    )
+
+    assert [path.name for path in paths] == [
+        "transcript.txt",
+        "transcript_timecodes.txt",
+        "transcript_diarize.txt",
+        "transcript_diarize_timecodes.txt",
+        "transcript.md",
+        "transcript.srt",
+        "transcript.vtt",
+    ]
+    assert paths[0].read_text(encoding="utf-8") == "one\n"
+    assert paths[1].read_text(encoding="utf-8") == "[00:00.000] one\n"
+    assert paths[2].read_text(encoding="utf-8") == "Speaker 1: one\n"
+    assert paths[3].read_text(encoding="utf-8") == "[00:00.000] Speaker 1: one\n"
+    assert "# Транскрипция: Live transcript" in paths[4].read_text(encoding="utf-8")

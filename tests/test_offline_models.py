@@ -123,6 +123,13 @@ def test_ci_proves_offline_bundle_needs_no_network():
     assert "HF_HUB_OFFLINE=1" in workflow
 
 
+def test_ci_offline_smoke_keeps_bundled_snapshots_with_selected_data_dir():
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "GIGAAM_DATA_DIR: ${{ runner.temp }}/gigaam_offline/data" in workflow
+    assert 'GIGAAM_DATA_DIR="${RUNNER_TEMP}/gigaam_offline/data"' in workflow
+
+
 def test_offline_smoke_refuses_a_build_without_bundled_models():
     entrypoint = Path("app.py").read_text(encoding="utf-8")
 

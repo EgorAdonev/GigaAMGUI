@@ -30,6 +30,8 @@ class _SpeechRun:
     start: int
     end: int
     audio: list[np.ndarray]
+    silence_start: int | None = None
+    last_partial_end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -37,8 +39,10 @@ class _Job:
     source: CaptureSource
     start: int
     end: int
+    event_start: int
     audio: np.ndarray
     is_final: bool
+    paragraph_break_after: bool
 
 
 class LiveAsrScheduler:
@@ -49,14 +53,24 @@ class LiveAsrScheduler:
         backend: WindowBackend,
         *,
         partial_delay_seconds: float = 1.5,
+        partial_context_seconds: float = 12.0,
+        partial_minimum_seconds: float = 1.5,
+        final_silence_seconds: float = 3.0,
         on_partial: Callable[[TranscriptEvent], None] | None = None,
         on_final: Callable[[TranscriptEvent], None] | None = None,
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
-        if partial_delay_seconds <= 0:
-            raise ValueError("partial_delay_seconds must be positive")
+        if min(
+            partial_delay_seconds, partial_context_seconds, partial_minimum_seconds, final_silence_seconds,
+        ) <= 0:
+            raise ValueError("live ASR timing values must be positive")
+        if partial_minimum_seconds > partial_context_seconds:
+            raise ValueError("partial minimum cannot exceed partial context")
         self._backend = backend
         self._partial_delay_seconds = partial_delay_seconds
+        self._partial_context_seconds = partial_context_seconds
+        self._partial_minimum_seconds = partial_minimum_seconds
+        self._final_silence_seconds = final_silence_seconds
         self._on_partial = on_partial
         self._on_final = on_final
         self._on_error = on_error
@@ -64,7 +78,7 @@ class LiveAsrScheduler:
         self._final_jobs: deque[_Job] = deque()
         self._partial_job: _Job | None = None
         self._partial_revisions: dict[str, int] = {}
-        self._refresh_seconds = 0.25
+        self._refresh_seconds = partial_delay_seconds
         self._closed = False
         self._condition = threading.Condition()
         self._worker = threading.Thread(target=self._run, name="live-asr", daemon=True)
@@ -95,13 +109,21 @@ class LiveAsrScheduler:
                     self._runs[chunk.source] = run
                 run.audio.append(audio.copy())
                 run.end = chunk.sample_offset + len(audio)
-                if run.end - run.start >= self._partial_delay_seconds * chunk.sample_rate:
+                run.silence_start = None
+                if self._should_refresh_partial(run, chunk.sample_rate):
                     self._partial_job = self._job(chunk.source, run, is_final=False)
+                    run.last_partial_end = run.end
                     self._condition.notify()
             elif run is not None:
-                self._final_jobs.append(self._job(chunk.source, run, is_final=True))
-                del self._runs[chunk.source]
-                self._condition.notify()
+                run.audio.append(audio.copy())
+                run.end = chunk.sample_offset + len(audio)
+                run.silence_start = run.silence_start or chunk.sample_offset
+                if run.end - run.silence_start >= self._final_silence_seconds * chunk.sample_rate:
+                    self._final_jobs.append(
+                        self._job(chunk.source, run, is_final=True, paragraph_break_after=True)
+                    )
+                    del self._runs[chunk.source]
+                    self._condition.notify()
 
     def flush(self) -> None:
         with self._condition:
@@ -121,9 +143,30 @@ class LiveAsrScheduler:
             self._condition.notify_all()
         self._worker.join(timeout=1)
 
-    @staticmethod
-    def _job(source: CaptureSource, run: _SpeechRun, *, is_final: bool) -> _Job:
-        return _Job(source, run.start, run.end, np.concatenate(run.audio), is_final)
+    def _should_refresh_partial(self, run: _SpeechRun, sample_rate: int) -> bool:
+        if run.end - run.start < self._partial_minimum_seconds * sample_rate:
+            return False
+        return (
+            run.last_partial_end is None
+            or run.end - run.last_partial_end >= self._refresh_seconds * sample_rate
+        )
+
+    def _job(
+        self,
+        source: CaptureSource,
+        run: _SpeechRun,
+        *,
+        is_final: bool,
+        paragraph_break_after: bool = False,
+    ) -> _Job:
+        audio = np.concatenate(run.audio)
+        start = run.start
+        if not is_final:
+            maximum = round(self._partial_context_seconds * 16_000)
+            if len(audio) > maximum:
+                audio = audio[-maximum:]
+                start = run.end - len(audio)
+        return _Job(source, start, run.end, run.start, audio, is_final, paragraph_break_after)
 
     def _run(self) -> None:
         while True:
@@ -155,19 +198,22 @@ class LiveAsrScheduler:
         text = " ".join(segment["transcription"].strip() for segment in segments).strip()
         if not text:
             return
-        event_id = f"{job.source.value}-{job.start}"
+        if job.is_final and len(text.split()) < 2:
+            return
+        event_id = f"{job.source.value}-{job.event_start}"
         revision = self._partial_revisions.get(event_id, -1) + 1
         self._partial_revisions[event_id] = revision
         event = TranscriptEvent(
             event_id=event_id,
             revision=revision,
             source=job.source,
-            sample_start=job.start,
+            sample_start=job.event_start,
             sample_end=job.end,
             timestamp_ns=time.time_ns(),
             text=text,
             status="final" if job.is_final else "partial",
             supersedes=revision - 1 if revision else None,
+            paragraph_break_after=job.paragraph_break_after,
         )
         callback = self._on_final if job.is_final else self._on_partial
         if callback is not None:

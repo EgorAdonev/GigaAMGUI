@@ -52,7 +52,7 @@ def test_removed_system_source_does_not_stop_microphone(tmp_path):
         tmp_path,
         LiveSettings(record_mix_audio=False),
         {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(),
     )
 
     session.start()
@@ -72,7 +72,7 @@ def test_asr_error_is_reported_without_stopping_its_source(tmp_path):
     events = []
     scheduler = None
 
-    def scheduler_factory(source, on_final, on_error):
+    def scheduler_factory(source, on_final, on_partial, on_error):
         nonlocal scheduler
         scheduler = FakeScheduler(on_error)
         return scheduler
@@ -97,7 +97,7 @@ def test_startup_permission_event_does_not_leave_source_active(tmp_path):
         tmp_path,
         LiveSettings(record_mix_audio=False),
         {CaptureSource.SYSTEM: StartDeniedAdapter()},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(),
     )
 
     session.start()

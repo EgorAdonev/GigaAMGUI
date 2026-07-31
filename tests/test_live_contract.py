@@ -48,6 +48,9 @@ class _FakeAdapter:
     def pause(self):
         return None
 
+    def resume(self):
+        return None
+
     def stop(self):
         return None
 

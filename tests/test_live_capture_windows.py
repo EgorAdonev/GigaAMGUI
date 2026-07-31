@@ -30,6 +30,9 @@ class FakeWindowsApi:
     def pause(self):
         self.paused = True
 
+    def resume(self):
+        self.paused = False
+
     def stop(self):
         self.stopped = True
 
@@ -98,6 +101,24 @@ def test_windows_preserves_native_callback_sample_rate():
     adapter.stop()
 
     assert chunks[0].sample_rate == 44_100
+
+
+def test_windows_native_api_restarts_paused_stream():
+    from src.live.capture.windows import _PyAudioWASAPI
+
+    class Stream:
+        starts = 0
+
+        def start_stream(self):
+            self.starts += 1
+
+    native = object.__new__(_PyAudioWASAPI)
+    stream = Stream()
+    native._stream = stream
+
+    native.resume()
+
+    assert stream.starts == 1
 
 
 def test_windows_stop_drains_already_queued_frames():

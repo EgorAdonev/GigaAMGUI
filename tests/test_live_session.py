@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from src.core.diarization.base import SpeakerSegment
 from src.live.exports import ExportSelection
@@ -21,6 +22,9 @@ class FakeAdapter:
     def pause(self):
         self.paused = True
 
+    def resume(self):
+        self.paused = False
+
     def stop(self):
         self.stopped = True
 
@@ -29,8 +33,9 @@ class FakeAdapter:
 
 
 class FakeScheduler:
-    def __init__(self, on_final):
+    def __init__(self, on_final, on_partial=lambda event: None):
         self._on_final = on_final
+        self._on_partial = on_partial
         self.submitted = []
         self.flushed = False
         self.closed = False
@@ -59,6 +64,15 @@ class FakeScheduler:
             )
         )
 
+    def partial(self, source, text):
+        chunk = self.submitted[-1]
+        self._on_partial(TranscriptEvent(
+            event_id=f"{source.value}-{chunk.sample_offset}", revision=0,
+            source=source, sample_start=chunk.sample_offset,
+            sample_end=chunk.sample_offset + len(chunk.frames), timestamp_ns=1,
+            text=text, status="partial",
+        ))
+
 
 def source_chunk(source, offset=0):
     return PcmChunk(
@@ -75,8 +89,8 @@ def test_session_records_journals_and_submits_derived_audio(tmp_path):
     adapter = FakeAdapter()
     schedulers = {}
 
-    def scheduler_factory(source, on_final, on_error):
-        scheduler = FakeScheduler(on_final)
+    def scheduler_factory(source, on_final, on_partial, on_error):
+        scheduler = FakeScheduler(on_final, on_partial)
         schedulers[source] = scheduler
         return scheduler
 
@@ -99,6 +113,29 @@ def test_session_records_journals_and_submits_derived_audio(tmp_path):
     assert json.loads((result.session_dir / "events.jsonl").read_text()) ["text"] == "hello"
 
 
+def test_session_notifies_partial_revisions_without_journaling_them(tmp_path):
+    adapter = FakeAdapter()
+    updates = []
+    scheduler = None
+
+    def scheduler_factory(source, on_final, on_partial, on_error):
+        nonlocal scheduler
+        scheduler = FakeScheduler(on_final, on_partial)
+        return scheduler
+
+    session = LiveSession(
+        tmp_path, LiveSettings(record_mix_audio=False), {CaptureSource.MIC: adapter},
+        scheduler_factory=scheduler_factory,
+    )
+    session.subscribe(updates.append)
+    session.start()
+    adapter.emit(source_chunk(CaptureSource.MIC))
+    scheduler.partial(CaptureSource.MIC, "A complete thought")
+
+    assert updates[-1].status == "partial"
+    assert session._journal.latest_events() == []
+
+
 def test_session_pause_stops_accepting_chunks_until_resumed(tmp_path):
     adapter = FakeAdapter()
     scheduler = FakeScheduler(lambda event: None)
@@ -106,7 +143,7 @@ def test_session_pause_stops_accepting_chunks_until_resumed(tmp_path):
         tmp_path,
         LiveSettings(record_mix_audio=False),
         {CaptureSource.MIC: adapter},
-        scheduler_factory=lambda source, on_final, on_error: scheduler,
+        scheduler_factory=lambda source, on_final, on_partial, on_error: scheduler,
     )
 
     session.start()
@@ -118,6 +155,67 @@ def test_session_pause_stops_accepting_chunks_until_resumed(tmp_path):
     assert scheduler.submitted == []
 
 
+def test_session_resume_restarts_capture_and_accepts_chunks(tmp_path):
+    adapter = FakeAdapter()
+    scheduler = FakeScheduler(lambda event: None)
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=False),
+        {CaptureSource.MIC: adapter},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: scheduler,
+    )
+
+    session.start()
+    session.pause()
+    session.resume()
+    adapter.emit(source_chunk(CaptureSource.MIC))
+
+    assert session.status().state is CaptureState.RECORDING
+    assert adapter.paused is False
+    assert len(scheduler.submitted) == 1
+
+
+def test_session_rejects_partial_for_finalized_source_event_revision(tmp_path):
+    updates = []
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=False),
+        {},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
+    )
+    session.subscribe(updates.append)
+    final = TranscriptEvent("shared", 1, CaptureSource.MIC, 0, 1, 1, "Final", "final")
+    stale_partial = TranscriptEvent("shared", 1, CaptureSource.MIC, 0, 1, 1, "Stale", "partial")
+    other_source_partial = TranscriptEvent("shared", 1, CaptureSource.SYSTEM, 0, 1, 1, "Other", "partial")
+
+    session._on_final(final)
+    session._on_partial(stale_partial)
+    session._on_partial(other_source_partial)
+
+    assert updates == [final, other_source_partial]
+
+
+def test_session_rejects_partial_for_diarization_revised_final(tmp_path):
+    updates = []
+
+    class FakeSortformer:
+        def estimate_events(self, events, stabilization_horizon_seconds):
+            return {event.event_id: "speaker" for event in events}
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(diarization_mode=DiarizationMode.LIVE_ESTIMATE, record_mix_audio=False),
+        {},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
+        diarization_factory=lambda backend: FakeSortformer(),
+    )
+    session.subscribe(updates.append)
+    session._on_final(TranscriptEvent("event", 0, CaptureSource.MIC, 0, 1, 1, "Final", "final"))
+    session._on_partial(TranscriptEvent("event", 1, CaptureSource.MIC, 0, 1, 1, "Stale", "partial"))
+
+    assert [event.status for event in updates] == ["final", "final"]
+
+
 def test_session_preserves_stereo_source_audio_while_deriving_mono_asr(tmp_path):
     adapter = FakeAdapter()
     scheduler = FakeScheduler(lambda event: None)
@@ -125,7 +223,7 @@ def test_session_preserves_stereo_source_audio_while_deriving_mono_asr(tmp_path)
         tmp_path,
         LiveSettings(record_mix_audio=False),
         {CaptureSource.MIC: adapter},
-        scheduler_factory=lambda source, on_final, on_error: scheduler,
+        scheduler_factory=lambda source, on_final, on_partial, on_error: scheduler,
     )
     stereo = PcmChunk(
         CaptureSource.MIC,
@@ -150,7 +248,7 @@ def test_ask_context_includes_only_final_events_with_timestamp_source_and_speake
         tmp_path,
         LiveSettings(record_mix_audio=False),
         {},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
     )
 
     session._on_final(TranscriptEvent(
@@ -172,7 +270,7 @@ def test_session_records_mix_when_aligned_sources_arrive(tmp_path):
         tmp_path,
         LiveSettings(record_mix_audio=True),
         {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
     )
 
     session.start()
@@ -190,7 +288,7 @@ def test_session_records_only_explicitly_selected_source_tracks(tmp_path):
         tmp_path,
         LiveSettings(record_mic_audio=True, record_system_audio=False, record_mix_audio=False),
         {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
     )
 
     session.start()
@@ -207,7 +305,7 @@ def test_off_mode_does_not_construct_a_diarizer(tmp_path):
         tmp_path,
         LiveSettings(diarization_mode=DiarizationMode.OFF, record_mix_audio=False),
         {},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
         diarization_factory=lambda backend: (_ for _ in ()).throw(AssertionError(backend)),
     )
 
@@ -227,7 +325,7 @@ def test_after_stop_revises_events_and_materializes_selected_exports(tmp_path):
         tmp_path,
         LiveSettings(diarization_mode=DiarizationMode.AFTER_STOP, record_mix_audio=False),
         {CaptureSource.MIC: adapter},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
         diarization_factory=lambda backend: FakeDiarizer(),
         export_selection=ExportSelection(txt=True, sample_rate=16_000),
     )
@@ -239,7 +337,7 @@ def test_after_stop_revises_events_and_materializes_selected_exports(tmp_path):
 
     events = session._journal.latest_events()
     assert [(event.revision, event.source_label, event.speaker) for event in events] == [(1, "MIC", "Speaker 1")]
-    assert (result.session_dir / "transcript.txt").read_text(encoding="utf-8") == "[00:00.000] MIC Speaker 1: hello\n"
+    assert (result.session_dir / "transcript.txt").read_text(encoding="utf-8") == "hello\n"
 
 
 def test_live_estimate_stabilizes_recent_events_and_reports_unavailable_sortformer(tmp_path):
@@ -256,7 +354,7 @@ def test_live_estimate_stabilizes_recent_events_and_reports_unavailable_sortform
         tmp_path,
         LiveSettings(diarization_mode=DiarizationMode.LIVE_ESTIMATE, record_mix_audio=False),
         {},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
         diarization_factory=lambda backend: FakeSortformer(),
     )
     session.subscribe(updates.append)
@@ -271,7 +369,7 @@ def test_live_estimate_stabilizes_recent_events_and_reports_unavailable_sortform
         tmp_path,
         LiveSettings(diarization_mode=DiarizationMode.LIVE_ESTIMATE, record_mix_audio=False),
         {},
-        scheduler_factory=lambda source, on_final, on_error: FakeScheduler(on_final),
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
         diarization_factory=lambda backend: object(),
     )
     unavailable.subscribe(updates.append)
@@ -279,3 +377,37 @@ def test_live_estimate_stabilizes_recent_events_and_reports_unavailable_sortform
 
     assert any(isinstance(update, CaptureEvent) and "Sortformer" in update.detail for update in updates)
     assert unavailable._journal.latest_events()[0].source_label == "SYSTEM"
+
+
+@pytest.mark.parametrize(
+    ("translate", "speaker", "detail"),
+    [
+        (
+            lambda ru, en: ru,
+            "Спикер 1",
+            "Sortformer unavailable. Используйте «После остановки» для офлайн-меток "
+            "спикеров; метки источников сохраняются.",
+        ),
+        (
+            lambda ru, en: en,
+            "Speaker 1",
+            "Sortformer unavailable. Use After stop for offline speaker labels; "
+            "retaining source labels.",
+        ),
+    ],
+)
+def test_live_session_localizes_speaker_and_diarization_messages(tmp_path, translate, speaker, detail):
+    updates = []
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=False),
+        {},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
+        translate=translate,
+    )
+    session.subscribe(updates.append)
+
+    assert session._anonymous_speaker(CaptureSource.MIC, "model-speaker") == speaker
+    session._report_live_diarization_unavailable(CaptureSource.MIC, "Sortformer unavailable.")
+
+    assert updates[-1].detail == detail
