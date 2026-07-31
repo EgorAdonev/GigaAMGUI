@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 from ..live.capture.factory import create_capture_adapter
@@ -40,7 +41,9 @@ class LiveMixin:
         self._live_partial_range = None
         self._live_partial_text = ""
         self._live_transcript_presenter = LiveTranscriptPresenter()
+        self._live_capture_status_times: dict[tuple[CaptureSource, str], float] = {}
         self._live_llm_cancel_event: threading.Event | None = None
+        self._live_conversation_id: str | None = None
 
     def _restore_live_settings(self) -> None:
         settings = self._live_settings
@@ -256,21 +259,27 @@ class LiveMixin:
             self.live_overlay = LiveOverlay(self)
             self.live_overlay.question_submitted.connect(self._answer_live_question)
             self.live_overlay.cancel_requested.connect(self._cancel_live_question)
+        if self.live_session is not None and callable(getattr(self.live_session, "conversation", None)):
+            self.live_overlay.set_conversation(self.live_session.conversation())
         self.live_overlay.show()
         self.live_overlay.raise_()
 
     def _update_live_event(self, event) -> None:
         if isinstance(event, TranscriptEvent):
-            if event.status == "partial":
-                self._replace_live_partial(f"{event.source_label}: {event.text}")
-            else:
-                self._live_transcript_presenter.add_final(event)
-                self._clear_live_partial()
-                self._render_live_transcript()
+            delta = self._live_transcript_presenter.add_event(event)
+            if delta:
+                self._append_live_transcript(self._live_transcript_presenter.rendered_delta(event, delta))
         elif isinstance(event, CaptureEvent):
-            self._append_live_transcript(f"{event.source.value}: {event.detail}")
-            self.lbl_live_status.setText(event.detail)
+            self._show_live_capture_status(event)
         self._update_live_overlay(event)
+
+    def _show_live_capture_status(self, event: CaptureEvent) -> None:
+        key = (event.source, event.detail)
+        now = time.monotonic()
+        if now - self._live_capture_status_times.get(key, float("-inf")) < 5:
+            return
+        self._live_capture_status_times[key] = now
+        self.lbl_live_status.setText(event.detail)
 
     def _append_live_transcript(self, text: str) -> None:
         scrollbar = self.live_transcript.verticalScrollBar()
@@ -290,17 +299,48 @@ class LiveMixin:
         self._live_partial_range = None
         self._live_partial_text = ""
         self._live_transcript_presenter.clear()
+        if self.live_session is not None and self.live_session.status().state not in {CaptureState.STOPPED, CaptureState.IDLE}:
+            self.live_session.clear_conversation()
         if self.live_overlay is not None:
             self.live_overlay.clear_transcript()
+            self.live_overlay.set_conversation(
+                self.live_session.conversation() if self.live_session is not None else []
+            )
 
     def _replace_live_partial(self, text: str) -> None:
-        self._live_partial_text = text
+        previous = self._live_partial_text
         scrollbar = self.live_transcript.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
         position = scrollbar.value()
-        rendered = self._live_transcript_presenter.rendered_paragraphs()
-        self.live_transcript.setPlainText(f"{rendered}\n\n{text}" if rendered else text)
+        cursor = self.live_transcript.textCursor()
+        if self._live_partial_range is None:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            if cursor.position() > 0:
+                cursor.insertText("\n\n")
+            start = cursor.position()
+        else:
+            start, end = self._live_partial_range
+            stable = self._stable_text_prefix_length(previous, text)
+            cursor.setPosition(start + stable)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            text = text[stable:]
+        cursor.insertText(text)
+        self._live_partial_text = previous[:stable] + text if previous else text
+        self._live_partial_range = (start, start + len(text))
+        if previous:
+            self._live_partial_range = (start, start + len(self._live_partial_text))
         scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
+
+    @staticmethod
+    def _stable_text_prefix_length(previous: str, current: str) -> int:
+        shared = 0
+        for previous_char, current_char in zip(previous, current):
+            if previous_char != current_char:
+                break
+            shared += 1
+        if shared == len(previous) or shared == len(current):
+            return shared
+        return min(previous.rfind(" ", 0, shared), current.rfind(" ", 0, shared)) + 1
 
     def _render_live_transcript(self) -> None:
         scrollbar = self.live_transcript.verticalScrollBar()
@@ -346,6 +386,9 @@ class LiveMixin:
                 self._t(f"LLM не настроена: {exc}", f"LLM is not configured: {exc}"),
             )
             return
+        turn = self.live_session.begin_conversation(question)
+        self._live_conversation_id = turn.id
+        self._sync_live_conversation()
         cancel_event = threading.Event()
         self._live_llm_cancel_event = cancel_event
         threading.Thread(
@@ -384,6 +427,10 @@ class LiveMixin:
     def _cancel_live_question(self) -> None:
         if self._live_llm_cancel_event is not None:
             self._live_llm_cancel_event.set()
+        if self.live_session is not None and self._live_conversation_id is not None:
+            self.live_session.cancel_conversation(self._live_conversation_id)
+            self._live_conversation_id = None
+            self._sync_live_conversation()
 
     def _live_llm_error_detail(self, error: str, llm_settings: dict) -> str:
         diagnostic = (error or "").strip()
@@ -398,11 +445,29 @@ class LiveMixin:
         return compact
 
     def _update_live_answer(self, status: str, text: str) -> None:
+        if self.live_session is not None and self._live_conversation_id is not None:
+            if status == "chunk":
+                self.live_session.append_conversation_answer(self._live_conversation_id, text)
+            else:
+                self.live_session.finish_conversation(
+                    self._live_conversation_id,
+                    text,
+                    status="error" if status == "error" else "complete",
+                )
+                self._live_conversation_id = None
+            self._sync_live_conversation()
+            return
         if self.live_overlay is not None:
             if status == "chunk":
                 self.live_overlay.append_answer(text)
             else:
                 self.live_overlay.set_answer(text)
+                self.live_overlay.finish_generation()
+
+    def _sync_live_conversation(self) -> None:
+        if self.live_overlay is not None and self.live_session is not None:
+            self.live_overlay.set_conversation(self.live_session.conversation())
+            if self._live_conversation_id is None:
                 self.live_overlay.finish_generation()
 
     def _update_live_status(self, status: LiveStatus) -> None:
@@ -422,6 +487,7 @@ class LiveMixin:
         self._last_result_dir = str(result.session_dir)
         self.lbl_live_status.setText(self._t("Сессия сохранена", "Session saved"))
         self._update_live_control_state(CaptureState.STOPPED)
+        self._sync_live_conversation()
 
     def _update_live_control_state(self, state: CaptureState | None = None) -> None:
         state = state or (self.live_session.status().state if self.live_session else CaptureState.IDLE)

@@ -14,7 +14,7 @@ from src.core.asr.types import normalize_window_audio
 from .capture.base import CaptureAdapter
 from .diarization import LIVE_ESTIMATE_STABILIZATION_HORIZON_SECONDS, label_event
 from .exports import ExportSelection, export_session
-from .journal import EventJournal, LiveSessionStore
+from .journal import ConversationJournal, EventJournal, LiveSessionStore
 from .recorder import SessionRecorder
 from .timeline import AlignedMixer, SourceTimeline
 from .types import CaptureEvent, CaptureEventKind, CaptureSource, CaptureState, DiarizationMode, LiveSettings, PcmChunk, TranscriptEvent
@@ -42,9 +42,20 @@ class SessionResult:
     exports: list[Path]
 
 
+@dataclass(frozen=True)
+class ConversationTurn:
+    id: str
+    question: str
+    answer: str = ""
+    status: str = "generating"
+
+
 SchedulerFactory = Callable[
     [CaptureSource, Callable[[TranscriptEvent], None], Callable[[TranscriptEvent], None], Callable[[Exception], None]], AsrScheduler
 ]
+
+MAX_MIX_SKEW_NS = 1_000_000_000
+MAX_PENDING_MIX_CHUNKS = 100
 
 
 class LiveSession:
@@ -74,6 +85,7 @@ class LiveSession:
         self._translate = translate or (lambda _ru, en: en)
         self._session_dir = LiveSessionStore(root_dir).create(settings)
         self._journal = EventJournal(self._session_dir / "events.jsonl")
+        self._conversation_journal = ConversationJournal(self._session_dir / "conversation.jsonl")
         self._recorder = recorder_factory(
             self._session_dir,
             {
@@ -91,12 +103,19 @@ class LiveSession:
         self._failed_sources: set[CaptureSource] = set()
         self._timelines: dict[CaptureSource, SourceTimeline] = {}
         self._mix_inputs: dict[CaptureSource, list[PcmChunk]] = {}
+        self._mix_timestamp_origins: dict[CaptureSource, int] = {}
+        self._mix_session_origin_ns: int | None = None
+        self._mixer = AlignedMixer(max_skew_seconds=MAX_MIX_SKEW_NS / 1_000_000_000)
         self._last_mix_error_ns: int | None = None
+        self._mix_recording_enabled = settings.record_mix_audio
         self._schedulers: dict[CaptureSource, AsrScheduler] = {}
         self._live_diarizers: dict[CaptureSource, object] = {}
         self._live_diarization_unavailable: set[CaptureSource] = set()
         self._speaker_labels: dict[tuple[CaptureSource, str], str] = {}
         self._finalized_revisions: dict[tuple[CaptureSource, str], int] = {}
+        self._partials: dict[CaptureSource, TranscriptEvent] = {}
+        self._conversation: list[ConversationTurn] = []
+        self._conversation_frozen = False
         self._subscribers: list[Callable[[TranscriptEvent | CaptureEvent | LiveStatus], None]] = []
         self._lock = RLock()
 
@@ -152,8 +171,15 @@ class LiveSession:
                 scheduler.close()
             self._flush_mix_inputs()
             recordings = self._recorder.close()
+            artifacts = getattr(self._recorder, "artifacts", None)
+            if callable(artifacts):
+                LiveSessionStore(self._session_dir.parent).update_metadata(
+                    self._session_dir,
+                    recordings=artifacts(),
+                )
             if self._settings.diarization_mode is DiarizationMode.AFTER_STOP:
                 self._diarize_recordings(recordings)
+            self._freeze_conversation()
             exports = export_session(self._session_dir, self._journal.latest_events(), self._export_selection)
             self._active_sources.clear()
             self._state = CaptureState.STOPPED
@@ -165,12 +191,53 @@ class LiveSession:
             return LiveStatus(self._state, set(self._active_sources), set(self._failed_sources))
 
     def ask_context(self) -> str:
-        return "\n".join(
+        final_text = "\n".join(
             f"[{datetime.fromtimestamp(event.timestamp_ns / 1_000_000_000, timezone.utc).isoformat()}] "
             f"{event.source_label}{f' / {event.speaker}' if event.speaker else ''}: {event.text}"
             for event in self._journal.latest_events()
             if event.status == "final"
         )
+        drafts = "\n".join(
+            f"[{source.value.upper()} draft] {event.text}"
+            for source, event in self._partials.items()
+        )
+        if not drafts:
+            return final_text
+        return f"Final transcript:\n{final_text}\n\nDraft transcript:\n{drafts}"
+
+    def begin_conversation(self, question: str) -> ConversationTurn:
+        with self._lock:
+            self._require_conversation_open()
+            turn = ConversationTurn(f"conversation-{len(self._conversation)}", question)
+            self._conversation.append(turn)
+            return turn
+
+    def append_conversation_answer(self, turn_id: str, text: str) -> None:
+        with self._lock:
+            self._require_conversation_open()
+            turn = self._conversation_turn(turn_id)
+            self._replace_conversation_turn(replace(turn, answer=turn.answer + text))
+
+    def finish_conversation(self, turn_id: str, answer: str | None = None, *, status: str = "complete") -> None:
+        with self._lock:
+            self._require_conversation_open()
+            turn = self._conversation_turn(turn_id)
+            turn = replace(turn, answer=turn.answer if answer is None else answer, status=status)
+            self._replace_conversation_turn(turn)
+            self._conversation_journal.append(turn)
+
+    def cancel_conversation(self, turn_id: str) -> None:
+        self.finish_conversation(turn_id, "", status="cancelled")
+
+    def clear_conversation(self) -> None:
+        with self._lock:
+            self._require_conversation_open()
+            self._conversation.clear()
+            self._conversation_journal.clear()
+
+    def conversation(self) -> list[ConversationTurn]:
+        with self._lock:
+            return list(self._conversation)
 
     def subscribe(self, callback: Callable[[TranscriptEvent | CaptureEvent | LiveStatus], None]) -> None:
         with self._lock:
@@ -186,8 +253,17 @@ class LiveSession:
             )
             for aligned in timeline.ingest(chunk):
                 self._recorder.write(aligned)
-                self._mix_inputs.setdefault(aligned.source, []).append(aligned)
-                self._write_ready_mixes()
+                if self._mix_recording_enabled:
+                    pending = self._mix_inputs.setdefault(aligned.source, [])
+                    pending.append(self._normalize_mix_timestamp(aligned))
+                    if len(pending) > MAX_PENDING_MIX_CHUNKS:
+                        self._disable_mix_recording(
+                            aligned.source,
+                            aligned.timestamp_ns,
+                            "pending input frame limit exceeded",
+                        )
+                    else:
+                        self._write_ready_mixes()
                 audio = normalize_window_audio(aligned.frames[:, 0], aligned.sample_rate, self._settings.asr_sample_rate)
                 offset = round(aligned.sample_offset * self._settings.asr_sample_rate / aligned.sample_rate)
                 self._schedulers[aligned.source].submit(
@@ -205,12 +281,36 @@ class LiveSession:
                 {"active_sources": sorted(source.value for source in self._active_sources)},
             )
 
+    def _normalize_mix_timestamp(self, chunk: PcmChunk) -> PcmChunk:
+        if self._mix_session_origin_ns is None:
+            self._mix_session_origin_ns = chunk.timestamp_ns
+        source_origin_ns = self._mix_timestamp_origins.setdefault(chunk.source, chunk.timestamp_ns)
+        return replace(
+            chunk,
+            timestamp_ns=self._mix_session_origin_ns + chunk.timestamp_ns - source_origin_ns,
+        )
+
     def _write_ready_mixes(self) -> None:
+        if not self._mix_recording_enabled:
+            return
         while self._active_sources and all(self._mix_inputs.get(source) for source in self._active_sources):
+            heads = {source: self._mix_inputs[source][0] for source in self._active_sources}
+            earliest = min(heads.values(), key=lambda chunk: chunk.timestamp_ns)
+            latest_timestamp_ns = max(chunk.timestamp_ns for chunk in heads.values())
+            if latest_timestamp_ns - earliest.timestamp_ns > MAX_MIX_SKEW_NS:
+                self._disable_mix_recording(
+                    earliest.source,
+                    earliest.timestamp_ns,
+                    "timestamp skew exceeds 1.000s",
+                )
+                return
             inputs = {source: self._mix_inputs[source].pop(0) for source in self._active_sources}
             self._write_mix(inputs)
 
     def _flush_mix_inputs(self) -> None:
+        if not self._mix_recording_enabled:
+            self._mix_inputs.clear()
+            return
         pending = [chunk for chunks in self._mix_inputs.values() for chunk in chunks]
         self._mix_inputs.clear()
         for chunk in sorted(pending, key=lambda item: item.timestamp_ns):
@@ -218,19 +318,30 @@ class LiveSession:
 
     def _write_mix(self, chunks: Mapping[CaptureSource, PcmChunk]) -> None:
         try:
-            self._recorder.write_mix(AlignedMixer().mix(chunks))
+            self._recorder.write_mix(self._mixer.mix(chunks))
         except Exception as exc:
             timestamp_ns = min(chunk.timestamp_ns for chunk in chunks.values())
-            if self._last_mix_error_ns is None or timestamp_ns - self._last_mix_error_ns >= 5_000_000_000:
-                self._last_mix_error_ns = timestamp_ns
-                source = next(iter(chunks))
-                self._notify(CaptureEvent(
-                    CaptureEventKind.STATUS,
-                    source,
-                    0,
-                    timestamp_ns,
-                    f"Mix recording unavailable: {exc}",
-                ))
+            self._disable_mix_recording(next(iter(chunks)), timestamp_ns, str(exc))
+
+    def _disable_mix_recording(self, source: CaptureSource, timestamp_ns: int, reason: str) -> None:
+        if not self._mix_recording_enabled:
+            return
+        self._mix_recording_enabled = False
+        self._mix_inputs.clear()
+        detail = self._translate(
+            "Запись смешанного аудио отключена для этой сессии: "
+            f"{reason}. Раздельная запись микрофона и системы, а также распознавание продолжаются.",
+            "Mixed audio recording disabled for this session: "
+            f"{reason}. Separate microphone and system recording and recognition continue.",
+        )
+        self._notify(CaptureEvent(CaptureEventKind.STATUS, source, 0, timestamp_ns, detail))
+
+    def _report_mix_error(self, chunks: Mapping[CaptureSource, PcmChunk], detail: str) -> None:
+        timestamp_ns = min(chunk.timestamp_ns for chunk in chunks.values())
+        if self._last_mix_error_ns is None or timestamp_ns - self._last_mix_error_ns >= 5_000_000_000:
+            self._last_mix_error_ns = timestamp_ns
+            source = next(iter(chunks))
+            self._notify(CaptureEvent(CaptureEventKind.STATUS, source, 0, timestamp_ns, detail))
 
     def _on_event(self, event: CaptureEvent) -> None:
         with self._lock:
@@ -240,6 +351,7 @@ class LiveSession:
 
     def _on_final(self, event: TranscriptEvent) -> None:
         with self._lock:
+            self._partials.pop(event.source, None)
             finalized = label_event(event, self._settings.diarization_mode)
             self._record_finalized(finalized)
             self._journal.append(finalized)
@@ -254,7 +366,29 @@ class LiveSession:
         with self._lock:
             if event.revision <= self._finalized_revisions.get((event.source, event.event_id), -1):
                 return
+            self._partials[event.source] = event
             self._notify(event)
+
+    def _require_conversation_open(self) -> None:
+        if self._conversation_frozen:
+            raise RuntimeError("conversation is frozen")
+
+    def _conversation_turn(self, turn_id: str) -> ConversationTurn:
+        for turn in self._conversation:
+            if turn.id == turn_id:
+                return turn
+        raise KeyError(turn_id)
+
+    def _replace_conversation_turn(self, updated: ConversationTurn) -> None:
+        self._conversation = [updated if turn.id == updated.id else turn for turn in self._conversation]
+
+    def _freeze_conversation(self) -> None:
+        if self._conversation_frozen:
+            return
+        for turn in self._conversation:
+            if turn.status == "generating":
+                self._conversation_journal.append(replace(turn, status="frozen"))
+        self._conversation_frozen = True
 
     def _record_finalized(self, event: TranscriptEvent) -> None:
         key = (event.source, event.event_id)

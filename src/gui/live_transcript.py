@@ -19,6 +19,13 @@ class LiveParagraph:
     sentences: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _StreamState:
+    visible_words: list[str]
+    latest_words: list[str]
+    rendered: bool = False
+
+
 class LiveTranscriptPresenter:
     """Group finalized speech without influencing capture or ASR decisions."""
 
@@ -30,6 +37,8 @@ class LiveTranscriptPresenter:
         self._active_event: TranscriptEvent | None = None
         self._last_sample_end: int | None = None
         self._force_new_paragraph = False
+        self.messages: list[TranscriptEvent] = []
+        self._streams: dict[str, _StreamState] = {}
 
     def clear(self) -> None:
         self.paragraphs.clear()
@@ -37,6 +46,92 @@ class LiveTranscriptPresenter:
         self._active_event = None
         self._last_sample_end = None
         self._force_new_paragraph = False
+        self.messages.clear()
+        self._streams.clear()
+
+    def add_event(self, event: TranscriptEvent) -> str:
+        """Return only words stable enough to append to the active stream."""
+        incoming = event.text.split()
+        if not incoming:
+            return ""
+        key = self._stream_key(event)
+        stream = self._streams.get(key)
+        if stream is None:
+            stream = _StreamState([], incoming)
+            self._streams[key] = stream
+            delta = incoming
+        elif event.status == "final":
+            if self._has_prefix(stream.visible_words, incoming):
+                delta = incoming[len(stream.visible_words):]
+            else:
+                # A provisional tail was corrected; never lose the final transcript.
+                stream.visible_words = []
+                delta = incoming
+            stream.latest_words = incoming
+        else:
+            common = self._common_prefix_length(stream.latest_words, incoming)
+            stable_end = min(common, max(0, len(stream.latest_words) - 2))
+            stable_words = stream.latest_words[:stable_end]
+            delta = stable_words[len(stream.visible_words):] if self._has_prefix(stream.visible_words, stable_words) else []
+            stream.latest_words = incoming
+        stream.visible_words.extend(delta)
+        if stream.visible_words:
+            rendered_event = TranscriptEvent(
+                event.event_id,
+                event.revision,
+                event.source,
+                event.sample_start,
+                event.sample_end,
+                event.timestamp_ns,
+                " ".join(stream.visible_words),
+                event.status,
+                event.speaker,
+                event.supersedes,
+                event.paragraph_break_after,
+            )
+            self.messages = [
+                item for item in self.messages
+                if self._stream_key(item) != key
+            ]
+            self.messages.append(rendered_event)
+        return " ".join(delta)
+
+    def rendered_delta(self, event: TranscriptEvent, delta: str) -> str:
+        stream = self._streams[self._stream_key(event)]
+        if stream.rendered:
+            return delta
+        stream.rendered = True
+        metadata = " · ".join(filter(None, (event.source_label, event.speaker)))
+        return f"{metadata}: {delta}"
+
+    def rendered_event(self, event: TranscriptEvent) -> str:
+        seconds = event.timestamp_ns / 1_000_000_000
+        minutes, seconds = divmod(seconds, 60)
+        timestamp = f"[{int(minutes):02d}:{seconds:06.3f}]"
+        metadata = " · ".join(filter(None, (event.source_label, event.speaker)))
+        return f"{timestamp} {metadata}: {event.text.strip()}"
+
+    def rendered_messages(self) -> str:
+        return "\n\n".join(self.rendered_event(event) for event in self.messages)
+
+    @staticmethod
+    def _common_prefix_length(left: list[str], right: list[str]) -> int:
+        length = 0
+        for previous, current in zip(left, right):
+            if previous.casefold() != current.casefold():
+                break
+            length += 1
+        return length
+
+    @staticmethod
+    def _has_prefix(prefix: list[str], words: list[str]) -> bool:
+        return len(prefix) <= len(words) and all(
+            left.casefold() == right.casefold() for left, right in zip(prefix, words)
+        )
+
+    @staticmethod
+    def _stream_key(event: TranscriptEvent) -> str:
+        return f"{event.source.value}:{event.event_id}"
 
     def add_final(self, event: TranscriptEvent) -> bool:
         """Add final ASR text and return whether it completed a sentence."""

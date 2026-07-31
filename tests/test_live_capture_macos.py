@@ -284,6 +284,9 @@ def test_macos_screen_capture_delegate_uses_objective_c_superclass_initializer()
         def startCaptureWithCompletionHandler_(self, handler):
             handler(None)
 
+        def stopCaptureWithCompletionHandler_(self, handler):
+            handler(None)
+
     class ScreenCaptureKit:
         SCShareableContent = ShareableContent
         SCStreamConfiguration = Configuration
@@ -294,3 +297,8 @@ def test_macos_screen_capture_delegate_uses_objective_c_superclass_initializer()
     capture = _ScreenCaptureKitCapture(None, None, Foundation, ScreenCaptureKit)
 
     capture.start(CaptureSource.SYSTEM, None, lambda *_args: None)
+    first_output_type = type(capture._output)
+    capture.pause()
+    capture.resume()
+
+    assert type(capture._output) is first_output_type

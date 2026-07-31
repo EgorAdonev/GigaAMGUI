@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QTextCursor
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from ..live.types import TranscriptEvent
@@ -49,8 +49,11 @@ class LiveOverlay(QWidget):
         self.setMinimumWidth(360)
         self.resize(480, 240)
         self._transcript_presenter = LiveTranscriptPresenter()
-        self._conversation: list[tuple[str, str]] = []
         self._active_question: str | None = None
+        self._generation_ellipsis = 0
+        self._generation_timer = QTimer(self)
+        self._generation_timer.setInterval(350)
+        self._generation_timer.timeout.connect(self._advance_generating_ellipsis)
 
         glass = QFrame()
         glass.setObjectName("liveGlass")
@@ -136,12 +139,19 @@ class LiveOverlay(QWidget):
         layout.addWidget(self.content)
 
     def update_transcript(self, event: TranscriptEvent) -> None:
-        if event.status == "final":
-            self._transcript_presenter.add_final(event)
-            self._render_final_text()
-            self.partial_label.clear()
-        elif event.status == "partial":
-            self.partial_label.setText(event.text)
+        delta = self._transcript_presenter.add_event(event)
+        if not delta:
+            return
+        scrollbar = self.final_text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
+        position = scrollbar.value()
+        cursor = self.final_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if cursor.position() > 0:
+            cursor.insertText("\n")
+        cursor.insertText(self._transcript_presenter.rendered_delta(event, delta))
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
+        self.partial_label.clear()
 
     def clear_transcript(self) -> None:
         self._transcript_presenter.clear()
@@ -162,32 +172,41 @@ class LiveOverlay(QWidget):
         self.adjustSize()
 
     def set_answer(self, text: str) -> None:
-        if self._active_question is None:
-            self.answer_text.setPlainText(text)
-        else:
-            self._conversation[-1] = (self._active_question, text)
-            self._render_conversation()
+        self.answer_text.setPlainText(
+            text if self._active_question is None else f"You: {self._active_question}\nAssistant: {text}"
+        )
         self.answer_card.show()
         self.answer_toggle_button.setText("Hide answer")
         self.adjustSize()
 
     def append_answer(self, text: str) -> None:
-        if self._active_question is None:
-            self.set_answer(text)
-            return
-        question, answer = self._conversation[-1]
-        self._conversation[-1] = (question, text if answer == "Generating..." else answer + text)
-        self._render_conversation()
+        scrollbar = self.answer_text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
+        position = scrollbar.value()
+        placeholder = self._generating_text()
+        current = self.answer_text.toPlainText()
+        if current.endswith(placeholder):
+            cursor = self.answer_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(placeholder))
+            cursor.insertText(text)
+        else:
+            cursor = self.answer_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(text)
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
 
     def finish_generation(self) -> None:
+        self._generation_timer.stop()
         self._active_question = None
         self.cancel_button.hide()
         self.send_button.setEnabled(True)
 
     def _begin_question(self, question: str) -> None:
         self._active_question = question
-        self._conversation.append((question, "Generating..."))
-        self._render_conversation()
+        self._generation_ellipsis = 0
+        self.answer_text.setPlainText(f"You: {question}\nAssistant: {self._generating_text()}")
+        self._generation_timer.start()
         self.answer_card.show()
         self.answer_toggle_button.setText("Hide answer")
         self.send_button.setEnabled(False)
@@ -197,21 +216,38 @@ class LiveOverlay(QWidget):
     def _cancel_generation(self) -> None:
         if self._active_question is None:
             return
-        question, _answer = self._conversation[-1]
-        self._conversation[-1] = (question, "")
+        self.answer_text.setPlainText(f"You: {self._active_question}")
+        self._generation_timer.stop()
         self._active_question = None
-        self._render_conversation()
         self.cancel_button.hide()
         self.send_button.setEnabled(True)
         self.cancel_requested.emit()
 
-    def _render_conversation(self) -> None:
-        self.answer_text.setPlainText(
-            "\n\n".join(
-                f"You: {question}" + (f"\nAssistant: {answer}" if answer else "")
-                for question, answer in self._conversation
-            )
-        )
+    def set_conversation(self, turns) -> None:
+        scrollbar = self.answer_text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
+        position = scrollbar.value()
+        self.answer_text.setPlainText("\n\n".join(
+            f"You: {turn.question}\nAssistant: "
+            f"{turn.answer or self._generating_text()}"
+            if turn.status == "generating"
+            else f"You: {turn.question}" + (f"\nAssistant: {turn.answer}" if turn.answer else "")
+            for turn in turns
+        ))
+        self.answer_card.setVisible(bool(turns))
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
+
+    def _advance_generating_ellipsis(self) -> None:
+        if self._active_question is None:
+            return
+        self._generation_ellipsis = (self._generation_ellipsis + 1) % 4
+        self.answer_text.setPlainText(self.answer_text.toPlainText().replace(
+            self._generating_text((self._generation_ellipsis - 1) % 4),
+            self._generating_text(),
+        ))
+
+    def _generating_text(self, ellipsis: int | None = None) -> str:
+        return f"Generating{'.' * (self._generation_ellipsis if ellipsis is None else ellipsis)}"
 
     def toggle_answer_visibility(self) -> None:
         visible = self.answer_card.isVisible()

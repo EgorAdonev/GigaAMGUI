@@ -9,6 +9,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from src.gui.live_overlay import LiveOverlay
+from src.live.session import ConversationTurn
 from src.live.types import CaptureSource, TranscriptEvent
 
 
@@ -47,8 +48,8 @@ def test_overlay_displays_recent_final_lines_partial_and_metadata(overlay):
     assert "Speaker 1" in overlay.final_text.toPlainText()
     assert "MIC" in overlay.final_text.toPlainText()
     assert "SYSTEM" in overlay.final_text.toPlainText()
-    assert "[00:00.000]" in overlay.final_text.toPlainText()
-    assert overlay.partial_label.text() == "Still listening"
+    assert "Still listening" not in overlay.final_text.toPlainText()
+    assert overlay.partial_label.text() == ""
 
 
 def test_overlay_keeps_long_history_and_preserves_manual_scroll_position(overlay, qapp):
@@ -121,3 +122,32 @@ def test_overlay_keeps_submitted_question_and_can_cancel_generation(overlay):
     assert "What was agreed?" in overlay.answer_text.toPlainText()
     assert "Generating" not in overlay.answer_text.toPlainText()
     assert overlay.cancel_button.isVisible() is False
+
+
+def test_overlay_animates_generation_and_appends_streamed_answer(overlay):
+    overlay.question_input.setText("What was agreed?")
+    overlay.send_button.click()
+    initial = overlay.answer_text.toPlainText()
+
+    overlay._advance_generating_ellipsis()
+    animated = overlay.answer_text.toPlainText()
+    overlay.append_answer("Friday")
+    overlay.append_answer(" at noon.")
+    overlay.finish_generation()
+
+    assert initial != animated
+    assert "Generating" not in overlay.answer_text.toPlainText()
+    assert overlay.answer_text.toPlainText().endswith("Friday at noon.")
+    assert overlay._generation_timer.isActive() is False
+
+
+def test_overlay_renders_session_owned_conversation_history(overlay):
+    overlay.set_conversation([
+        ConversationTurn("one", "What was agreed?", "Friday", "complete"),
+        ConversationTurn("two", "Who owns it?", "Generating...", "generating"),
+    ])
+
+    assert overlay.answer_text.toPlainText() == (
+        "You: What was agreed?\nAssistant: Friday\n\n"
+        "You: Who owns it?\nAssistant: Generating..."
+    )

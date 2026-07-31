@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from src.live.recorder import SessionRecorder
 from src.live.types import CaptureSource, PcmChunk
@@ -36,24 +37,44 @@ def test_recorder_preserves_source_rate_channels_and_selected_artifacts(tmp_path
     paths = recorder.close()
 
     assert paths == {
-        CaptureSource.MIC: tmp_path / "mic.wav",
-        CaptureSource.SYSTEM: tmp_path / "system.wav",
+        CaptureSource.MIC: tmp_path / "mic.flac",
+        CaptureSource.SYSTEM: tmp_path / "system.flac",
     }
     assert [(writer.kwargs["samplerate"], writer.kwargs["channels"]) for writer in writers] == [
         (48_000, 2),
         (44_100, 1),
     ]
+    assert all(writer.kwargs["format"] == "FLAC" for writer in writers)
+    assert all(writer.kwargs["subtype"] == "PCM_24" for writer in writers)
     assert all(writer.closed for writer in writers)
 
 
-def test_recorder_selects_rf64_before_wav_size_limit(tmp_path):
-    formats = []
+def test_recorder_rejects_oversized_blocks_and_rolls_flac_segments(tmp_path):
+    writers = []
 
     def factory(path, **kwargs):
-        formats.append(kwargs["format"])
-        return Writer(path, **kwargs)
+        writer = Writer(path, **kwargs)
+        writers.append(writer)
+        return writer
 
-    recorder = SessionRecorder(tmp_path, writer_factory=factory, rf64_limit_bytes=16)
-    recorder.write(chunk(CaptureSource.MIC, channels=2))
+    recorder = SessionRecorder(
+        tmp_path,
+        writer_factory=factory,
+        max_block_frames=3,
+        segment_max_bytes=18,
+    )
+    with pytest.raises(ValueError, match="frame limit"):
+        recorder.write(PcmChunk(CaptureSource.MIC, 48_000, 2, 0, np.ones((4, 2), np.float32), 1))
+    recorder.write(PcmChunk(CaptureSource.MIC, 48_000, 2, 0, np.ones((3, 2), np.float32), 1))
+    recorder.write(PcmChunk(CaptureSource.MIC, 48_000, 2, 3, np.ones((2, 2), np.float32), 2))
+    recorder.close()
 
-    assert formats == ["RF64"]
+    assert [writer.path.name for writer in writers] == ["mic.flac", "mic-002.flac"]
+    assert [sum(len(block) for block in writer.blocks) for writer in writers] == [3, 2]
+    artifact = recorder.artifacts()["mic"]
+    assert artifact["codec"] == "FLAC PCM_24"
+    assert artifact["rate"] == 48_000
+    assert artifact["channels"] == 2
+    assert artifact["frames"] == 5
+    assert artifact["bytes"] == 30
+    assert len(artifact["segments"]) == 2

@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.live.session import LiveSession
+from src.live.session import MAX_PENDING_MIX_CHUNKS, LiveSession
 from src.live.types import CaptureEvent, CaptureEventKind, CaptureSource, CaptureState, LiveSettings, PcmChunk
 
 
@@ -163,7 +163,8 @@ def test_mix_failure_is_throttled_without_stopping_source_recording_or_asr(tmp_p
     assert len(schedulers[CaptureSource.SYSTEM].submitted) == 2
     assert session.status().active_sources == {CaptureSource.MIC, CaptureSource.SYSTEM}
     assert [event.detail for event in updates if isinstance(event, CaptureEvent)] == [
-        "Mix recording unavailable: mix writer failed"
+        "Mixed audio recording disabled for this session: mix writer failed. "
+        "Separate microphone and system recording and recognition continue."
     ]
 
 
@@ -203,3 +204,204 @@ def test_staggered_source_callbacks_produce_timestamp_aligned_mix(tmp_path):
 
     assert len(recorders[0].mixes) == 1
     assert recorders[0].mixes[0].frames.shape == (4, 1)
+
+
+def test_distinct_device_timestamp_epochs_produce_normal_mix(tmp_path):
+    class CollectingRecorder:
+        def __init__(self, *args):
+            self.mixes = []
+
+        def write(self, chunk):
+            return None
+
+        def write_mix(self, chunk):
+            self.mixes.append(chunk)
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    recorders = []
+
+    def recorder_factory(*args):
+        recorder = CollectingRecorder(*args)
+        recorders.append(recorder)
+        return recorder
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(),
+        recorder_factory=recorder_factory,
+    )
+    session.start()
+    mic.emit(source_chunk(CaptureSource.MIC, timestamp_ns=10_000_000_000, frame_count=480))
+    system.emit(source_chunk(CaptureSource.SYSTEM, timestamp_ns=9_000_000_000_000, frame_count=480))
+
+    assert len(recorders[0].mixes) == 1
+    assert recorders[0].mixes[0].frames.shape == (480, 1)
+    assert session._mix_recording_enabled is True
+
+
+def test_small_normalized_clock_jitter_and_drift_keeps_mix_bounded(tmp_path):
+    class CollectingRecorder:
+        def __init__(self, *args):
+            self.mixes = []
+
+        def write(self, chunk):
+            return None
+
+        def write_mix(self, chunk):
+            self.mixes.append(chunk)
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    recorders = []
+
+    def recorder_factory(*args):
+        recorder = CollectingRecorder(*args)
+        recorders.append(recorder)
+        return recorder
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(),
+        recorder_factory=recorder_factory,
+    )
+    session.start()
+    mic.emit(source_chunk(CaptureSource.MIC, timestamp_ns=1_000_000_000, frame_count=480))
+    system.emit(source_chunk(CaptureSource.SYSTEM, timestamp_ns=8_000_000_000, frame_count=480))
+    mic.emit(source_chunk(CaptureSource.MIC, offset=480, timestamp_ns=1_010_000_000, frame_count=480))
+    system.emit(source_chunk(CaptureSource.SYSTEM, offset=480, timestamp_ns=8_010_300_000, frame_count=480))
+
+    assert [mix.frames.shape for mix in recorders[0].mixes] == [(480, 1), (494, 1)]
+    assert session._mix_recording_enabled is True
+
+
+def test_large_skew_disables_mix_once_without_interrupting_source_recording_or_asr(tmp_path):
+    class RecordingScheduler(FakeScheduler):
+        def __init__(self):
+            super().__init__()
+            self.submitted = []
+
+        def submit(self, chunk):
+            self.submitted.append(chunk)
+
+    class CollectingRecorder:
+        def __init__(self, *args):
+            self.written = []
+            self.mixes = []
+
+        def write(self, chunk):
+            self.written.append(chunk)
+
+        def write_mix(self, chunk):
+            self.mixes.append(chunk)
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    schedulers = {}
+    recorders = []
+    updates = []
+
+    def scheduler_factory(source, on_final, on_partial, on_error):
+        scheduler = RecordingScheduler()
+        schedulers[source] = scheduler
+        return scheduler
+
+    def recorder_factory(*args):
+        recorder = CollectingRecorder(*args)
+        recorders.append(recorder)
+        return recorder
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=scheduler_factory,
+        recorder_factory=recorder_factory,
+    )
+    session.subscribe(updates.append)
+    session.start()
+    mic.emit(source_chunk(CaptureSource.MIC, timestamp_ns=1, frame_count=480))
+    system.emit(source_chunk(CaptureSource.SYSTEM, timestamp_ns=15_000_000_001, frame_count=480))
+    mic.emit(source_chunk(CaptureSource.MIC, offset=480, timestamp_ns=10_000_001, frame_count=480))
+    system.emit(source_chunk(CaptureSource.SYSTEM, offset=480, timestamp_ns=16_500_000_001, frame_count=480))
+
+    assert len(recorders[0].mixes) == 1
+    assert len(recorders[0].written) == 4
+    assert len(schedulers[CaptureSource.MIC].submitted) == 2
+    assert len(schedulers[CaptureSource.SYSTEM].submitted) == 2
+    mix_notices = [
+        event for event in updates
+        if isinstance(event, CaptureEvent) and "Mixed audio recording disabled" in event.detail
+    ]
+    assert len(mix_notices) == 1
+    assert mix_notices[0].source is CaptureSource.MIC
+    assert session._mix_recording_enabled is False
+
+
+def test_missing_peer_cannot_grow_mix_queue_or_mix_recording_without_bound(tmp_path):
+    class RecordingScheduler(FakeScheduler):
+        def __init__(self):
+            super().__init__()
+            self.submitted = []
+
+        def submit(self, chunk):
+            self.submitted.append(chunk)
+
+    class CollectingRecorder:
+        def __init__(self, *args):
+            self.written = []
+            self.mixes = []
+
+        def write(self, chunk):
+            self.written.append(chunk)
+
+        def write_mix(self, chunk):
+            self.mixes.append(chunk)
+
+        def close(self):
+            return {}
+
+    mic = FakeAdapter()
+    system = FakeAdapter()
+    schedulers = {}
+    recorders = []
+
+    def scheduler_factory(source, on_final, on_partial, on_error):
+        scheduler = RecordingScheduler()
+        schedulers[source] = scheduler
+        return scheduler
+
+    def recorder_factory(*args):
+        recorder = CollectingRecorder(*args)
+        recorders.append(recorder)
+        return recorder
+
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=True),
+        {CaptureSource.MIC: mic, CaptureSource.SYSTEM: system},
+        scheduler_factory=scheduler_factory,
+        recorder_factory=recorder_factory,
+    )
+    session.start()
+    for index in range(MAX_PENDING_MIX_CHUNKS + 5):
+        mic.emit(source_chunk(CaptureSource.MIC, offset=index * 480, timestamp_ns=index * 10_000_000, frame_count=480))
+
+    assert session._mix_inputs == {}
+    assert session._mix_recording_enabled is False
+    assert len(recorders[0].written) == MAX_PENDING_MIX_CHUNKS + 5
+    assert recorders[0].mixes == []
+    assert len(schedulers[CaptureSource.MIC].submitted) == MAX_PENDING_MIX_CHUNKS + 5

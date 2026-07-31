@@ -109,7 +109,7 @@ def test_session_records_journals_and_submits_derived_audio(tmp_path):
     assert session.status().state is CaptureState.STOPPED
     assert len(schedulers[CaptureSource.MIC].submitted[0].frames) == 1_600
     assert schedulers[CaptureSource.MIC].submitted[0].sample_offset == 0
-    assert result.recordings == {CaptureSource.MIC: result.session_dir / "mic.wav"}
+    assert result.recordings == {CaptureSource.MIC: result.session_dir / "mic.flac"}
     assert json.loads((result.session_dir / "events.jsonl").read_text()) ["text"] == "hello"
 
 
@@ -263,6 +263,50 @@ def test_ask_context_includes_only_final_events_with_timestamp_source_and_speake
     assert session.ask_context() == "[1970-01-01T00:00:01+00:00] MIC / Speaker 1: Final text"
 
 
+def test_session_context_includes_latest_partial_as_a_source_labelled_draft(tmp_path):
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=False),
+        {},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
+    )
+
+    session._on_final(TranscriptEvent("final", 0, CaptureSource.MIC, 0, 1, 1, "Final text", "final"))
+    session._on_partial(TranscriptEvent("draft", 0, CaptureSource.SYSTEM, 1, 2, 2, "Still speaking", "partial"))
+
+    assert session.ask_context() == (
+        "Final transcript:\n[1970-01-01T00:00:00+00:00] MIC: Final text\n\n"
+        "Draft transcript:\n[SYSTEM draft] Still speaking"
+    )
+
+
+def test_session_persists_conversation_and_freezes_it_after_stop(tmp_path):
+    session = LiveSession(
+        tmp_path,
+        LiveSettings(record_mix_audio=False),
+        {},
+        scheduler_factory=lambda source, on_final, on_partial, on_error: FakeScheduler(on_final, on_partial),
+    )
+
+    turn = session.begin_conversation("What was agreed?")
+    session.append_conversation_answer(turn.id, "Friday")
+    session.finish_conversation(turn.id)
+    session.start()
+    session.stop()
+
+    assert [(item.question, item.answer, item.status) for item in session.conversation()] == [
+        ("What was agreed?", "Friday", "complete"),
+    ]
+    assert json.loads((session._session_dir / "conversation.jsonl").read_text()) == {
+        "id": turn.id,
+        "question": "What was agreed?",
+        "answer": "Friday",
+        "status": "complete",
+    }
+    with pytest.raises(RuntimeError, match="frozen"):
+        session.begin_conversation("One more question")
+
+
 def test_session_records_mix_when_aligned_sources_arrive(tmp_path):
     mic = FakeAdapter()
     system = FakeAdapter()
@@ -278,7 +322,18 @@ def test_session_records_mix_when_aligned_sources_arrive(tmp_path):
     system.emit(source_chunk(CaptureSource.SYSTEM))
     result = session.stop()
 
-    assert (result.session_dir / "mix.wav").exists()
+    assert (result.session_dir / "mix.flac").exists()
+    recordings = json.loads((result.session_dir / "metadata.json").read_text())["recordings"]
+    assert set(recordings) == {"mic", "system", "mix"}
+    assert recordings["mix"] == {
+        "paths": [str(result.session_dir / "mix.flac")],
+        "codec": "FLAC PCM_24",
+        "rate": 48_000,
+        "channels": 1,
+        "frames": 4_800,
+        "bytes": 14_400,
+        "segments": [{"path": str(result.session_dir / "mix.flac"), "frames": 4_800, "bytes": 14_400}],
+    }
 
 
 def test_session_records_only_explicitly_selected_source_tracks(tmp_path):
@@ -296,8 +351,8 @@ def test_session_records_only_explicitly_selected_source_tracks(tmp_path):
     system.emit(source_chunk(CaptureSource.SYSTEM))
     result = session.stop()
 
-    assert result.recordings == {CaptureSource.MIC: result.session_dir / "mic.wav"}
-    assert not (result.session_dir / "system.wav").exists()
+    assert result.recordings == {CaptureSource.MIC: result.session_dir / "mic.flac"}
+    assert not (result.session_dir / "system.flac").exists()
 
 
 def test_off_mode_does_not_construct_a_diarizer(tmp_path):
@@ -318,7 +373,7 @@ def test_after_stop_revises_events_and_materializes_selected_exports(tmp_path):
 
     class FakeDiarizer:
         def diarize(self, path):
-            assert Path(path).name == "mic.wav"
+            assert Path(path).name == "mic.flac"
             return [SpeakerSegment(0.0, 1.0, "model-speaker-a")]
 
     session = LiveSession(

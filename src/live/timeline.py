@@ -16,11 +16,15 @@ class SourceTimeline:
         sample_rate: int,
         channels: int,
         on_event: Callable[[CaptureEvent], None] | None = None,
+        max_gap_seconds: float = 1.0,
     ) -> None:
+        if max_gap_seconds < 0:
+            raise ValueError("max_gap_seconds must be non-negative")
         self._source = source
         self._sample_rate = sample_rate
         self._channels = channels
         self._on_event = on_event
+        self._max_gap_frames = round(max_gap_seconds * sample_rate)
         self._next_offset: int | None = None
 
     def ingest(self, chunk: PcmChunk) -> list[PcmChunk]:
@@ -34,17 +38,20 @@ class SourceTimeline:
         emitted: list[PcmChunk] = []
         if chunk.sample_offset > self._next_offset:
             gap = chunk.sample_offset - self._next_offset
-            emitted.append(
-                PcmChunk(
-                    self._source,
-                    self._sample_rate,
-                    self._channels,
-                    self._next_offset,
-                    np.zeros((gap, self._channels), dtype=np.float32),
-                    chunk.timestamp_ns,
+            if gap <= self._max_gap_frames:
+                emitted.append(
+                    PcmChunk(
+                        self._source,
+                        self._sample_rate,
+                        self._channels,
+                        self._next_offset,
+                        np.zeros((gap, self._channels), dtype=np.float32),
+                        chunk.timestamp_ns,
+                    )
                 )
-            )
-            self._emit_discontinuity(chunk, f"gap={gap}")
+                self._emit_discontinuity(chunk, f"gap={gap}")
+            else:
+                self._emit_discontinuity(chunk, f"gap={gap} discarded")
             self._next_offset = chunk.sample_offset
         elif chunk.sample_offset < self._next_offset:
             overlap = self._next_offset - chunk.sample_offset
@@ -78,15 +85,37 @@ class SourceTimeline:
 
 
 class AlignedMixer:
-    def __init__(self, mic_gain: float = 1.0, system_gain: float = 1.0) -> None:
+    def __init__(
+        self,
+        mic_gain: float = 1.0,
+        system_gain: float = 1.0,
+        *,
+        max_skew_seconds: float = 1.0,
+        max_output_frames: int = 48_000,
+    ) -> None:
+        if max_skew_seconds < 0:
+            raise ValueError("max_skew_seconds must be non-negative")
+        if max_output_frames <= 0:
+            raise ValueError("max_output_frames must be positive")
         self._mic_gain = mic_gain
         self._system_gain = system_gain
+        self._max_skew_seconds = max_skew_seconds
+        self._max_output_frames = max_output_frames
 
     def mix(self, chunks: Mapping[CaptureSource, PcmChunk]) -> PcmChunk:
         if not chunks:
             raise ValueError("at least one chunk is required")
         reference = chunks.get(CaptureSource.MIC) or chunks.get(CaptureSource.SYSTEM) or next(iter(chunks.values()))
         start_ns = min(chunk.timestamp_ns for chunk in chunks.values())
+        skew_seconds = (max(chunk.timestamp_ns for chunk in chunks.values()) - start_ns) / 1_000_000_000
+        if skew_seconds > self._max_skew_seconds:
+            raise ValueError(f"timestamp skew {skew_seconds:.3f}s exceeds mix limit")
+        expected_frames = {
+            source: round(len(chunk.frames) * reference.sample_rate / chunk.sample_rate)
+            for source, chunk in chunks.items()
+        }
+        if any(frame_count > self._max_output_frames for frame_count in expected_frames.values()):
+            raise ValueError("mix input exceeds output frame limit")
         normalized = {
             source: self._normalize(chunk, reference.sample_rate, reference.channels)
             for source, chunk in chunks.items()
@@ -96,6 +125,8 @@ class AlignedMixer:
             for source, chunk in chunks.items()
         }
         frame_count = max(starts[source] + len(frames) for source, frames in normalized.items())
+        if frame_count > self._max_output_frames:
+            raise ValueError("mix output exceeds frame limit")
         mixed = np.zeros((frame_count, reference.channels), dtype=np.float32)
         mic = chunks.get(CaptureSource.MIC)
         system = chunks.get(CaptureSource.SYSTEM)

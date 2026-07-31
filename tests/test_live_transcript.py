@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from src.gui.live_transcript import LiveTranscriptPresenter
 from src.live.types import CaptureSource, TranscriptEvent
 
@@ -26,17 +28,33 @@ def _event(
     )
 
 
-def test_presenter_completes_a_sentence_from_multiple_finalized_phrases():
+def test_presenter_shows_the_initial_partial_tail_without_waiting_for_a_revision():
     presenter = LiveTranscriptPresenter()
 
-    assert presenter.add_final(_event("First part", event_id="one")) is False
-    assert presenter.paragraphs == []
-    assert presenter.add_final(_event(" of the sentence.", event_id="two")) is True
+    first = _event("First part of the", event_id="one")
+    first = replace(first, status="partial")
+    second = _event("First part of the revised sentence", event_id="one")
+    second = replace(second, status="partial")
+    final = _event("First part of the revised sentence.", event_id="one")
 
-    paragraph = presenter.paragraphs[0]
-    assert paragraph.sentences == ["First part of the sentence."]
-    assert paragraph.source_label == "MIC"
-    assert paragraph.speaker is None
+    assert presenter.add_event(first) == "First part of the"
+    assert presenter.add_event(second) == ""
+    assert presenter.add_event(final) == "revised sentence."
+    assert presenter.rendered_messages() == "[00:00.000] MIC: First part of the revised sentence."
+
+
+def test_presenter_keeps_revisions_inside_uncommitted_tail():
+    presenter = LiveTranscriptPresenter()
+    first = _event("One two three four", event_id="one")
+    first = replace(first, status="partial")
+    second = _event("One two changed four five", event_id="one")
+    second = replace(second, status="partial")
+    final = _event("One two changed four five.", event_id="one")
+
+    assert presenter.add_event(first) == "One two three four"
+    assert presenter.add_event(second) == ""
+    assert presenter.add_event(final) == "One two changed four five."
+    assert presenter.rendered_messages() == "[00:00.000] MIC: One two changed four five."
 
 
 def test_presenter_keeps_incomplete_sentence_active_until_later_completion():

@@ -14,6 +14,30 @@ from .common import NativeCaptureApi, QueuedCaptureAdapter, SoundDeviceCapture
 from .factory import CaptureUnavailable
 
 
+_SCREEN_CAPTURE_OUTPUT_CLASS: type[Any] | None = None
+
+
+def _screen_capture_output_class(foundation: Any, objc: Any) -> type[Any]:
+    """Create the PyObjC delegate once; Objective-C class names are process-global."""
+    global _SCREEN_CAPTURE_OUTPUT_CLASS
+    if _SCREEN_CAPTURE_OUTPUT_CLASS is None:
+        class ScreenCaptureOutput(foundation.NSObject):
+            def initWithOwner_callback_(self, owner: Any, output_callback: Callable[..., None]) -> Any:
+                self = objc.super(ScreenCaptureOutput, self).init()
+                if self is not None:
+                    self._owner = owner
+                    self._callback = output_callback
+                return self
+
+            def stream_didOutputSampleBuffer_ofType_(self, _stream: Any, sample_buffer: Any, output_type: Any) -> None:
+                if output_type != self._owner._sck.SCStreamOutputTypeAudio:
+                    return
+                self._owner._deliver_audio(sample_buffer, self._callback)
+
+        _SCREEN_CAPTURE_OUTPUT_CLASS = ScreenCaptureOutput
+    return _SCREEN_CAPTURE_OUTPUT_CLASS
+
+
 def _load_macos_microphone_api() -> NativeCaptureApi:
     try:
         import sounddevice
@@ -86,21 +110,8 @@ class _ScreenCaptureKitCapture:
         configuration.setSampleRate_(48_000)
         configuration.setChannelCount_(2)
         stream_filter = self._sck.SCContentFilter.alloc().initWithDisplay_excludingWindows_(displays[0], [])
-        owner = self
-
-        class Output(self._foundation.NSObject):
-            def initWithCallback_(self, output_callback: Callable[..., None]) -> Any:
-                self = objc.super(Output, self).init()
-                if self is not None:
-                    self._callback = output_callback
-                return self
-
-            def stream_didOutputSampleBuffer_ofType_(self, _stream: Any, sample_buffer: Any, output_type: Any) -> None:
-                if output_type != owner._sck.SCStreamOutputTypeAudio:
-                    return
-                owner._deliver_audio(sample_buffer, self._callback)
-
-        self._output = Output.alloc().initWithCallback_(callback)
+        output_class = _screen_capture_output_class(self._foundation, objc)
+        self._output = output_class.alloc().initWithOwner_callback_(self, callback)
         self._stream = self._sck.SCStream.alloc().initWithFilter_configuration_delegate_(stream_filter, configuration, None)
         add_result = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
             self._output, self._sck.SCStreamOutputTypeAudio, None, None

@@ -132,17 +132,20 @@ def test_live_controls_drive_injected_capture_session_lifecycle(window, tmp_path
     window._start_live_session()
     assert window.live_session.status().state.value == "recording"
     assert window.btn_live_start.isEnabled() is False
+    assert window.btn_live_start.text() == "НАЧАТЬ ЗАПИСЬ"
     assert window.btn_live_pause.isEnabled() is True
     assert window.btn_live_stop.isEnabled() is True
 
     window._pause_live_session()
     assert window.live_session.status().state.value == "paused"
     assert window.btn_live_start.isEnabled() is True
+    assert window.btn_live_start.text() == "ПРОДОЛЖИТЬ"
     assert window.btn_live_pause.isEnabled() is False
 
     window._start_live_session()
     assert window.live_session.status().state.value == "recording"
     assert window.btn_live_start.isEnabled() is False
+    assert window.btn_live_start.text() == "НАЧАТЬ ЗАПИСЬ"
     assert window.btn_live_pause.isEnabled() is True
 
     window._stop_live_session()
@@ -414,7 +417,7 @@ def test_live_uses_actual_default_device_and_live_scheduler(window, tmp_path, mo
     assert isinstance(window.live_session._schedulers[CaptureSource.MIC], Scheduler)
 
 
-def test_live_rejects_missing_output_folder_and_renders_events_in_tab(window, tmp_path):
+def test_live_rejects_missing_output_folder_and_keeps_capture_events_out_of_transcript(window, tmp_path):
     missing = tmp_path / "missing"
     window.live_output_dir.setText(str(missing))
 
@@ -434,11 +437,23 @@ def test_live_rejects_missing_output_folder_and_renders_events_in_tab(window, tm
     )
     window._update_live_event(event)
 
-    assert "Microphone permission denied" in window.live_transcript.toPlainText()
+    assert "Microphone permission denied" not in window.live_transcript.toPlainText()
     assert "Microphone permission denied" in window.lbl_live_status.text()
 
 
-def test_live_tab_revises_partial_and_preserves_manual_transcript_scroll(window, qapp):
+def test_live_capture_status_is_throttled_in_non_modal_banner(window, monkeypatch):
+    updates = []
+    monkeypatch.setattr(window.lbl_live_status, "setText", lambda text: updates.append(text))
+    event = CaptureEvent(CaptureEventKind.STATUS, CaptureSource.MIC, 0, 0, "Capture warning")
+
+    window._update_live_event(event)
+    window._update_live_event(event)
+
+    assert updates == ["Capture warning"]
+    assert window.live_transcript.toPlainText() == ""
+
+
+def test_live_tab_shows_the_current_partial_tail_without_rewriting_history(window, qapp):
     for number in range(30):
         window._update_live_event(TranscriptEvent(
             f"final-{number}", 0, CaptureSource.MIC, number, number + 1, 0,
@@ -455,8 +470,9 @@ def test_live_tab_revises_partial_and_preserves_manual_transcript_scroll(window,
         supersedes=0,
     ))
 
-    assert "First partial" not in window.live_transcript.toPlainText()
-    assert "Revised partial" in window.live_transcript.toPlainText()
+    transcript = window.live_transcript.toPlainText()
+    assert "First partial" in transcript
+    assert "Revised partial" not in transcript
     assert scrollbar.value() == 0
 
     scrollbar.setValue(scrollbar.maximum())
@@ -466,7 +482,7 @@ def test_live_tab_revises_partial_and_preserves_manual_transcript_scroll(window,
     assert scrollbar.value() == scrollbar.maximum()
 
 
-def test_live_tab_and_overlay_share_paragraph_boundaries_and_keep_partials_out_of_history(window):
+def test_live_tab_and_overlay_share_append_only_transcript_history(window):
     window._show_live_overlay()
     events = [
         TranscriptEvent("one", 0, CaptureSource.MIC, 0, 1, 0, "First sentence.", "final"),
@@ -486,11 +502,12 @@ def test_live_tab_and_overlay_share_paragraph_boundaries_and_keep_partials_out_o
 
     tab_text = window.live_transcript.toPlainText()
     overlay_text = window.live_overlay.final_text.toPlainText()
-    assert tab_text.split("\n\n")[0] == overlay_text.split("\n\n")[0]
+    assert tab_text.strip() == overlay_text.strip()
     assert "MIC" in tab_text
     assert "Speaker 2" in tab_text
-    assert "First partial" not in tab_text
-    assert window.live_overlay.partial_label.text() == "Revised partial"
+    assert "First partial" in tab_text
+    assert "Revised partial" not in tab_text
+    assert "First partial" in overlay_text
     assert "Revised partial" not in overlay_text
 
 
@@ -509,6 +526,9 @@ def test_clear_live_display_keeps_active_session_and_saved_transcript(window, tm
         "Saved final text", "final",
     )
     window.live_session._on_final(event)
+    turn = window.live_session.begin_conversation("What was said?")
+    window.live_session.finish_conversation(turn.id, "Saved answer")
+    window.live_overlay.set_conversation(window.live_session.conversation())
     window._update_live_event(TranscriptEvent(
         "partial-1", 0, CaptureSource.MIC, 16_000, 32_000, 1_000_000_000,
         "Visible partial", "partial",
@@ -523,6 +543,8 @@ def test_clear_live_display_keeps_active_session_and_saved_transcript(window, tm
     assert window.live_transcript.toPlainText() == ""
     assert window.live_overlay.final_text.toPlainText() == ""
     assert window.live_overlay.partial_label.text() == ""
+    assert window.live_session.conversation() == []
+    assert window.live_overlay.answer_text.toPlainText() == ""
 
 
 def test_live_folder_picker_updates_reused_folder_display(window, tmp_path, monkeypatch):

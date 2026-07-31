@@ -58,6 +58,24 @@ def test_timeline_keeps_emitted_offsets_monotonic_for_gaps_and_overlaps():
     assert emitted[1].frames.tolist() == [[0.0], [0.0], [0.0]]
 
 
+def test_timeline_does_not_allocate_silence_for_large_source_gap():
+    events = []
+    timeline = SourceTimeline(
+        CaptureSource.MIC,
+        sample_rate=48_000,
+        channels=1,
+        on_event=events.append,
+        max_gap_seconds=0.1,
+    )
+
+    first = timeline.ingest(chunk(0, [0.1]))
+    resumed = timeline.ingest(chunk(720_000, [0.2]))
+
+    assert [part.frames.shape for part in first + resumed] == [(1, 1), (1, 1)]
+    assert resumed[0].sample_offset == 720_000
+    assert "gap=719999 discarded" in events[-1].detail
+
+
 def test_timeline_preserves_monotonic_offsets_for_seeded_gaps_and_overlaps():
     random = np.random.default_rng(0)
     timeline = SourceTimeline(CaptureSource.MIC, sample_rate=48_000, channels=1)
@@ -136,3 +154,21 @@ def test_mixer_treats_missing_source_as_silence():
 
     assert mixed.sample_offset == 12
     assert mixed.frames.tolist() == [[0.25], [-0.25]]
+
+
+def test_mixer_rejects_large_timestamp_skew_before_allocating_padding():
+    mixer = AlignedMixer(max_skew_seconds=0.1, max_output_frames=4_800)
+
+    with np.testing.assert_raises_regex(ValueError, "timestamp skew"):
+        mixer.mix(
+            {
+                CaptureSource.MIC: PcmChunk(
+                    CaptureSource.MIC, 48_000, 1, 0,
+                    np.ones((480, 1), dtype=np.float32), 1,
+                ),
+                CaptureSource.SYSTEM: PcmChunk(
+                    CaptureSource.SYSTEM, 48_000, 1, 0,
+                    np.ones((480, 1), dtype=np.float32), 15_000_000_001,
+                ),
+            }
+        )
