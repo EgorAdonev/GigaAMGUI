@@ -77,7 +77,9 @@ def test_ci_builds_and_publishes_full_app_zip():
     assert 'unzip -tq "$ARCHIVE"' in text
     assert "MAX_RELEASE_ASSET_BYTES" in text
     assert "CFBundleShortVersionString" in text
-    assert "Attach full app to release" in text
+    assert "publish-release:" in text
+    assert "needs: [build, build-macos-full]" in text
+    assert "Download completed release artifacts" in text
     assert "requirements-sortformer.txt" in text
     assert 'GIGAAM_BUNDLE_SORTFORMER: "1"' in text
 
