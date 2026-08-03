@@ -116,6 +116,7 @@ checkpoints/
 !requirements-macos-mlx.txt
 !requirements-onnx-gpu.txt
 !requirements-legacy-pytorch.txt
+!requirements-live-windows.txt
 !web/static/robots.txt
 *.wav
 *.mp3

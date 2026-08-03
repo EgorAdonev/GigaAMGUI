@@ -1,0 +1,2 @@
+# Windows live capture only. Requires Windows microphone privacy permission.
+PyAudioWPatch==0.2.12.7
