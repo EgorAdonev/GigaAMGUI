@@ -163,10 +163,11 @@ def test_windows_portable_build_installs_live_capture_runtime():
     assert "runner.os == 'Windows'" in workflow
 
 
-def test_tagged_release_workflow_publishes_matching_release_notes():
-    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+def test_tagged_build_workflow_publishes_matching_release_notes_after_assets():
+    workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")
 
-    assert '- "v*"' in workflow
+    assert "publish-release:" in workflow
+    assert "needs: [build, build-macos-full]" in workflow
     assert "RELEASE_NOTES_${VERSION}.md" in workflow
     assert "body_path:" in workflow
 
