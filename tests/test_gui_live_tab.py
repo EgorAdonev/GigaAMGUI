@@ -91,6 +91,21 @@ def test_live_start_passes_exact_selected_audio_tracks_to_session(window, tmp_pa
     window._stop_live_session()
 
 
+
+def test_live_start_surfaces_missing_capture_runtime(window, tmp_path, monkeypatch):
+    from src.live.capture.factory import CaptureUnavailable
+
+    def unavailable(*_args):
+        raise CaptureUnavailable("Windows live capture requires PyAudioWPatch.")
+
+    monkeypatch.setattr("src.gui.live_mixin.create_capture_adapter", unavailable)
+    window.live_output_dir.setText(str(tmp_path))
+
+    window._start_live_session()
+
+    assert window.live_session is None
+    assert "PyAudioWPatch" in window.lbl_live_status.text()
+
 def test_live_settings_persist_across_windows(qapp, tmp_path):
     first = GigaTranscriberQtApp()
     first.combo_live_source.setCurrentIndex(first.combo_live_source.findData("both"))

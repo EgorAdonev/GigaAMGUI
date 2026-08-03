@@ -92,7 +92,6 @@ class LlmMixin:
                         llm_settings,
                         item["text"],
                         prompt,
-                        on_stream_chunk=self.signals.llm_stream_chunk.emit,
                     )
                     self.signals.llm_response_ready.emit()
                     completed_operations += 1

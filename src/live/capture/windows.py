@@ -94,6 +94,14 @@ class _WindowsAdapter(QueuedCaptureAdapter):
     ) -> None:
         super().__init__(source, api, device_id, api_loader=api_loader)
 
+    def _native_api(self) -> NativeCaptureApi:
+        try:
+            return super()._native_api()
+        except ImportError as exc:
+            raise CaptureUnavailable(
+                "Windows live capture requires PyAudioWPatch. Install requirements-live-windows.txt."
+            ) from exc
+
 
 class WindowsMicrophoneAdapter(_WindowsAdapter):
     def __init__(self, device_id: str | None = None, **kwargs: Any) -> None:

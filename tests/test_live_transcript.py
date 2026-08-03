@@ -1,4 +1,5 @@
 from dataclasses import replace
+import pytest
 
 from src.gui.live_transcript import LiveTranscriptPresenter
 from src.live.types import CaptureSource, TranscriptEvent
@@ -96,3 +97,19 @@ def test_presenter_starts_a_new_paragraph_after_a_silence_finalized_phrase():
         ["First phrase."],
         ["Second phrase."],
     ]
+
+
+
+@pytest.mark.parametrize(
+    ("text", "sentences"),
+    [
+        ("Первая мысль… Вторая мысль.", ["Первая мысль…", "Вторая мысль."]),
+        ("Он сказал: «Готово!» Дальше.", ["Он сказал: «Готово!»", "Дальше."]),
+    ],
+)
+def test_presenter_recognizes_unicode_and_quoted_sentence_endings(text, sentences):
+    presenter = LiveTranscriptPresenter()
+
+    assert presenter.add_final(_event(text)) is True
+    assert presenter.active_text == ""
+    assert presenter.paragraphs[0].sentences == sentences

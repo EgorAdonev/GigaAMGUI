@@ -1,0 +1,52 @@
+name: Publish release notes
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v1.4.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish bilingual release notes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve matching release notes
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          NOTES="docs/RELEASE_NOTES_${VERSION}.md"
+          test -f "$NOTES" || {
+            echo "Missing release notes: $NOTES" >&2
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release notes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: GigaAM Transcriber ${{ steps.notes.outputs.version }}
+          body_path: ${{ steps.notes.outputs.path }}

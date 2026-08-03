@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..live.capture.factory import create_capture_adapter
+from ..live.capture.factory import CaptureUnavailable, create_capture_adapter
 from ..live.exports import ExportSelection
 from ..live.asr import LiveAsrScheduler
 from ..live.session import LiveSession, LiveStatus
@@ -199,14 +199,18 @@ class LiveMixin:
             ),
             record_mix_audio=sources == {CaptureSource.MIC, CaptureSource.SYSTEM},
         )
-        adapters = {
-            source: create_capture_adapter(
-                sys.platform,
-                source,
-                settings.mic_device_id if source is CaptureSource.MIC else settings.system_device_id,
-            )
-            for source in sources
-        }
+        try:
+            adapters = {
+                source: create_capture_adapter(
+                    sys.platform,
+                    source,
+                    settings.mic_device_id if source is CaptureSource.MIC else settings.system_device_id,
+                )
+                for source in sources
+            }
+        except CaptureUnavailable as exc:
+            self.lbl_live_status.setText(str(exc))
+            return
         self.live_session = LiveSession(
             Path(output_dir),
             settings,

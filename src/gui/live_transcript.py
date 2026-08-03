@@ -8,7 +8,7 @@ import re
 from ..live.types import TranscriptEvent
 
 
-_SENTENCE = re.compile(r".+?[.!?]+(?=\s|$)", re.DOTALL)
+_SENTENCE = re.compile(r".+?(?:[.!?]+|…+)(?:[\"'»”)\]}]+)?(?=\s|$)", re.DOTALL)
 
 
 @dataclass

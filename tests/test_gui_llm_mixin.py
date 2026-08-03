@@ -66,3 +66,49 @@ def test_run_llm_provider_unknown_maps_to_runtimeerror(monkeypatch):
     monkeypatch.setattr(llm_service, "run_provider", fake_run)
     with pytest.raises(RuntimeError, match="Неизвестный LLM-провайдер: Zzz"):
         stub._run_llm_provider({"provider": "Zzz"}, "t", "p")
+
+
+
+def test_batch_llm_processing_does_not_force_api_streaming():
+    class Signal:
+        def __init__(self):
+            self.values = []
+
+        def emit(self, *args):
+            self.values.append(args)
+
+    class BatchStub(_Stub):
+        def __init__(self):
+            self.signals = type(
+                "Signals",
+                (),
+                {
+                    "llm_progress_started": Signal(),
+                    "llm_progress_update": Signal(),
+                    "llm_response_ready": Signal(),
+                    "llm_stream_chunk": Signal(),
+                    "llm_finished": Signal(),
+                },
+            )()
+            self.llm_last_result_name = ""
+            self.callback = object()
+
+        def log(self, _message):
+            pass
+
+        def _run_llm_provider(self, *_args, on_stream_chunk=None):
+            self.callback = on_stream_chunk
+            return "answer"
+
+        def _save_llm_result(self, *_args):
+            return []
+
+    stub = BatchStub()
+    stub._run_llm_processing(
+        {"provider": "API"},
+        [{"name": "transcript", "text": "text", "source_path": None}],
+        [("summary", "Summary", "Prompt")],
+        ["txt"],
+    )
+
+    assert stub.callback is None

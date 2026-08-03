@@ -154,6 +154,22 @@ def test_all_desktop_specs_include_platform_live_capture_dependencies():
         assert "live_d" in text and "live_b" in text and "live_h" in text, spec
 
 
+
+def test_windows_portable_build_installs_live_capture_runtime():
+    workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+
+    assert "Install Windows live capture runtime" in workflow
+    assert "requirements-live-windows.txt" in workflow
+    assert "runner.os == 'Windows'" in workflow
+
+
+def test_tagged_release_workflow_publishes_matching_release_notes():
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert '- "v*"' in workflow
+    assert "RELEASE_NOTES_${VERSION}.md" in workflow
+    assert "body_path:" in workflow
+
 def test_all_specs_remain_valid_python_after_shared_contract_changes():
     for spec in PACKAGING_DIR.glob("*.spec"):
         ast.parse(spec.read_text(encoding="utf-8-sig"), filename=str(spec))
