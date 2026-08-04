@@ -400,8 +400,12 @@ def test_missing_peer_cannot_grow_mix_queue_or_mix_recording_without_bound(tmp_p
     for index in range(MAX_PENDING_MIX_CHUNKS + 5):
         mic.emit(source_chunk(CaptureSource.MIC, offset=index * 480, timestamp_ns=index * 10_000_000, frame_count=480))
 
-    assert session._mix_inputs == {}
-    assert session._mix_recording_enabled is False
+    # A peer that never delivers audio must not starve the mix track: the
+    # queue stays bounded, mixing continues with the source that is live, and
+    # the session keeps mixed recording enabled (issue #42).
+    assert all(len(pending) <= MAX_PENDING_MIX_CHUNKS + 1 for pending in session._mix_inputs.values())
+    assert session._mix_recording_enabled is True
+    assert CaptureSource.SYSTEM in session._mix_stalled_sources
     assert len(recorders[0].written) == MAX_PENDING_MIX_CHUNKS + 5
-    assert recorders[0].mixes == []
+    assert len(recorders[0].mixes) == MAX_PENDING_MIX_CHUNKS + 5
     assert len(schedulers[CaptureSource.MIC].submitted) == MAX_PENDING_MIX_CHUNKS + 5

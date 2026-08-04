@@ -12,8 +12,16 @@ from ..live.capture.factory import CaptureUnavailable, create_capture_adapter
 from ..live.exports import ExportSelection
 from ..live.asr import LiveAsrScheduler
 from ..live.session import LiveSession, LiveStatus
-from ..live.types import CaptureEvent, CaptureSource, CaptureState, DiarizationMode, LiveSettings, TranscriptEvent
-from PyQt6.QtWidgets import QFileDialog
+from ..live.types import (
+    CaptureEvent,
+    CaptureEventKind,
+    CaptureSource,
+    CaptureState,
+    DiarizationMode,
+    LiveSettings,
+    TranscriptEvent,
+)
+from PyQt6.QtWidgets import QApplication, QFileDialog
 from PyQt6.QtGui import QTextCursor
 from .live_overlay import LiveOverlay
 from .live_transcript import LiveTranscriptPresenter
@@ -44,6 +52,7 @@ class LiveMixin:
         self._live_capture_status_times: dict[tuple[CaptureSource, str], float] = {}
         self._live_llm_cancel_event: threading.Event | None = None
         self._live_conversation_id: str | None = None
+        self._live_stop_thread: threading.Thread | None = None
 
     def _restore_live_settings(self) -> None:
         settings = self._live_settings
@@ -65,6 +74,9 @@ class LiveMixin:
         self.spin_live_subtitle_max_width.setValue(int(settings.get("subtitle_max_line_width", 64)))
         self.spin_live_gain.setValue(float(settings.get("gain", 1.0)))
         self.live_output_dir.setText(str(settings.get("output_dir", self.output_dir)))
+        if bool(settings.get("overlay_visible", False)):
+            self.btn_live_overlay.setChecked(True)
+            self._show_live_overlay()
         self._refresh_live_devices()
         self._update_live_source_controls()
         self._update_live_export_controls()
@@ -92,7 +104,7 @@ class LiveMixin:
             "subtitle_sentence_split": self.cb_live_subtitle_sentence_split.isChecked(),
             "subtitle_max_line_count": self.spin_live_subtitle_max_lines.value(),
             "subtitle_max_line_width": self.spin_live_subtitle_max_width.value(),
-            "overlay_visible": False,
+            "overlay_visible": bool(self.btn_live_overlay.isChecked()),
             "diarization_mode": self.combo_live_diarization.currentData(),
             "gain": self.spin_live_gain.value(),
             "output_dir": self.live_output_dir.text().strip(),
@@ -146,7 +158,7 @@ class LiveMixin:
         ):
             combo.clear()
             try:
-                devices = create_capture_adapter(sys.platform, source).devices()
+                devices = self._probe_devices(source)
             except Exception:
                 devices = []
             for device in devices:
@@ -159,6 +171,21 @@ class LiveMixin:
                 )
             if index >= 0 and combo.count():
                 combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _probe_devices(source: CaptureSource) -> list:
+        """Enumerate devices and free the native handle straight away.
+
+        Each probe adapter owns a PyAudio/WASAPI instance, so leaving them to
+        the garbage collector leaked one native handle per device refresh.
+        """
+        probe = create_capture_adapter(sys.platform, source)
+        try:
+            return probe.devices()
+        finally:
+            release = getattr(probe, "release", None)
+            if callable(release):
+                release()
 
     def _select_live_output_folder(self) -> None:
         initial_dir = self.live_output_dir.text().strip() or self.output_dir or str(Path.home())
@@ -185,6 +212,9 @@ class LiveMixin:
                 self._t("Выберите существующую папку сессий", "Select an existing session folder")
             )
             return
+        self._clear_live_problem()
+        if not self._preload_live_model():
+            return
         self._save_live_settings()
         sources = self._selected_live_sources()
         settings = LiveSettings(
@@ -210,6 +240,7 @@ class LiveMixin:
             }
         except CaptureUnavailable as exc:
             self.lbl_live_status.setText(str(exc))
+            self._report_live_problem(str(exc))
             return
         self.live_session = LiveSession(
             Path(output_dir),
@@ -238,19 +269,74 @@ class LiveMixin:
                 sample_rate=settings.asr_sample_rate,
             ),
             translate=self._t,
+            log=self._log_live,
         )
         self.live_session.subscribe(self._on_live_session_update)
         self.live_session.start()
+
+    def _log_live(self, message: str) -> None:
+        """Route live-path diagnostics into the shared processing log tab."""
+        self.log(f"[live] {message}")
+
+    def _preload_live_model(self) -> bool:
+        """Fail loudly before capture starts instead of decoding into a void."""
+        if self.model_loader.is_loaded():
+            return True
+        self.lbl_live_status.setText(
+            self._t("Загрузка модели распознавания…", "Loading the recognition model…")
+        )
+        QApplication.processEvents()
+        if self.model_loader.load_model(logger=self.log):
+            return True
+        detail = self.model_loader.diagnostics().get("error") or self._t("неизвестная ошибка", "unknown error")
+        message = self._t(
+            f"Не удалось загрузить модель распознавания: {detail}",
+            f"Could not load the recognition model: {detail}",
+        )
+        self.lbl_live_status.setText(self._t("Готово к записи", "Ready for live capture"))
+        self._report_live_problem(message)
+        return False
+
+    def _report_live_problem(self, message: str) -> None:
+        self.lbl_live_problem.setText(message)
+        self.lbl_live_problem.show()
+        self.log(f"[live] {message}")
+
+    def _clear_live_problem(self) -> None:
+        self.lbl_live_problem.clear()
+        self.lbl_live_problem.hide()
 
     def _pause_live_session(self) -> None:
         if self.live_session is not None and self.live_session.status().state is CaptureState.RECORDING:
             self.live_session.pause()
 
     def _stop_live_session(self) -> None:
-        if self.live_session is None:
+        session = self.live_session
+        if session is None:
             return
-        if self.live_session.status().state in {CaptureState.RECORDING, CaptureState.PAUSED, CaptureState.FAILED}:
-            self.signals.live_finished.emit(self.live_session.stop())
+        if session.status().state not in {CaptureState.RECORDING, CaptureState.PAUSED, CaptureState.FAILED}:
+            return
+        # Stopping now drains every queued decode, which can outlast a frame.
+        # Run it off the Qt thread so the window stays responsive meanwhile.
+        self.btn_live_stop.setEnabled(False)
+        self.btn_live_pause.setEnabled(False)
+        self.lbl_live_status.setText(
+            self._t("Завершение расшифровки…", "Finishing transcription…")
+        )
+        self._live_stop_thread = threading.Thread(
+            target=self._finish_live_session, args=(session,), daemon=True
+        )
+        self._live_stop_thread.start()
+
+    def _finish_live_session(self, session) -> None:
+        try:
+            result = session.stop()
+        except Exception as exc:
+            self.signals.live_event.emit(
+                CaptureEvent(CaptureEventKind.STATUS, CaptureSource.MIC, 0, 0, str(exc))
+            )
+            return
+        self.signals.live_finished.emit(result)
 
     def _on_live_session_update(self, value) -> None:
         if isinstance(value, LiveStatus):
@@ -263,10 +349,30 @@ class LiveMixin:
             self.live_overlay = LiveOverlay(self)
             self.live_overlay.question_submitted.connect(self._answer_live_question)
             self.live_overlay.cancel_requested.connect(self._cancel_live_question)
+            self.live_overlay.visibility_changed.connect(self._on_live_overlay_visibility)
         if self.live_session is not None and callable(getattr(self.live_session, "conversation", None)):
             self.live_overlay.set_conversation(self.live_session.conversation())
         self.live_overlay.show()
         self.live_overlay.raise_()
+
+    def _hide_live_overlay(self) -> None:
+        if self.live_overlay is not None:
+            self.live_overlay.hide()
+
+    def _toggle_live_overlay(self) -> None:
+        """Mirror the frameless overlay's own close affordances on the tab button."""
+        if self.btn_live_overlay.isChecked():
+            self._show_live_overlay()
+        else:
+            self._hide_live_overlay()
+
+    def _on_live_overlay_visibility(self, visible: bool) -> None:
+        if self.btn_live_overlay.isChecked() != visible:
+            blocked = self.btn_live_overlay.blockSignals(True)
+            self.btn_live_overlay.setChecked(visible)
+            self.btn_live_overlay.blockSignals(blocked)
+        self._live_settings["overlay_visible"] = visible
+        self.user_settings.set_value("live_settings", self._live_settings)
 
     def _update_live_event(self, event) -> None:
         if isinstance(event, TranscriptEvent):
@@ -284,6 +390,11 @@ class LiveMixin:
             return
         self._live_capture_status_times[key] = now
         self.lbl_live_status.setText(event.detail)
+        # State updates overwrite the status line, so problems get their own
+        # banner that survives until the next session starts.
+        if event.kind is not CaptureEventKind.DISCONTINUITY:
+            self.lbl_live_problem.setText(event.detail)
+            self.lbl_live_problem.show()
 
     def _append_live_transcript(self, text: str) -> None:
         scrollbar = self.live_transcript.verticalScrollBar()

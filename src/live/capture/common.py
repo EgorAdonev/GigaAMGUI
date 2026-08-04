@@ -119,6 +119,8 @@ class QueuedCaptureAdapter:
         self._worker: Thread | None = None
         self._on_chunk: Callable[[PcmChunk], None] | None = None
         self._on_event: Callable[[CaptureEvent], None] | None = None
+        self._reported_failures: set[str] = set()
+        self.dispatch_failures = 0
 
     def devices(self) -> list[CaptureDevice]:
         return [
@@ -200,6 +202,18 @@ class QueuedCaptureAdapter:
         if not self._queue.put(chunk):
             self._emit(CaptureEventKind.OVERFLOW, f"capture queue full; dropped_frames={len(copied)}", chunk)
 
+    def release(self) -> None:
+        """Drop the native handle acquired for device enumeration."""
+        if self._worker is not None or self._api is None:
+            return
+        close = getattr(self._api, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        self._api = None
+
     def _native_api(self) -> NativeCaptureApi:
         if self._api is None:
             if self._api_loader is None:
@@ -235,9 +249,39 @@ class QueuedCaptureAdapter:
             except Empty:
                 event = None
             if event is not None and self._on_event is not None:
-                self._on_event(event)
+                self._deliver_event(event)
             chunk = self._queue.get(timeout=0.02)
             if chunk is not None and self._on_chunk is not None:
-                self._on_chunk(chunk)
+                # A failing consumer must never silently end capture: in a
+                # windowed frozen build the traceback would go nowhere.
+                try:
+                    self._on_chunk(chunk)
+                except Exception as exc:
+                    self._report_dispatch_failure(exc, chunk)
             if self._stopped.is_set() and chunk is None:
                 return
+
+    def _deliver_event(self, event: CaptureEvent) -> None:
+        try:
+            self._on_event(event)  # type: ignore[misc]
+        except Exception:
+            # Subscriber faults are theirs to own; capture keeps running.
+            self.dispatch_failures += 1
+
+    def _report_dispatch_failure(self, exc: Exception, chunk: PcmChunk) -> None:
+        self.dispatch_failures += 1
+        detail = f"chunk delivery failed: {type(exc).__name__}: {exc}"
+        if detail in self._reported_failures:
+            return
+        self._reported_failures.add(detail)
+        if self._on_event is None:
+            return
+        self._deliver_event(
+            CaptureEvent(
+                CaptureEventKind.STATUS,
+                self.source,
+                chunk.sample_offset,
+                chunk.timestamp_ns,
+                detail,
+            )
+        )

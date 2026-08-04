@@ -48,6 +48,19 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+def _wait_for_live_stop(window, timeout=5.0):
+    """Stopping drains queued decodes off the Qt thread; wait it out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        thread = window._live_stop_thread
+        if thread is not None and not thread.is_alive():
+            QApplication.processEvents()
+            return
+        time.sleep(0.01)
+    raise AssertionError("live session did not finish stopping")
+
+
 @pytest.fixture
 def window(qapp, request):
     instance = GigaTranscriberQtApp()
@@ -164,6 +177,7 @@ def test_live_controls_drive_injected_capture_session_lifecycle(window, tmp_path
     assert window.btn_live_pause.isEnabled() is True
 
     window._stop_live_session()
+    _wait_for_live_stop(window)
     assert window.live_session.status().state.value == "stopped"
     assert window.btn_live_start.isEnabled() is True
     assert window.btn_live_stop.isEnabled() is False

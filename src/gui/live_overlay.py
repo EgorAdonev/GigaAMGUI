@@ -40,6 +40,7 @@ class LiveOverlay(QWidget):
 
     question_submitted = pyqtSignal(str)
     cancel_requested = pyqtSignal()
+    visibility_changed = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -84,8 +85,9 @@ class LiveOverlay(QWidget):
         self.collapse_button.setToolTip("Collapse")
         self.collapse_button.clicked.connect(self.toggle_collapsed)
         header_layout.addWidget(self.collapse_button)
-        self.close_button = QPushButton("×")
-        self.close_button.setToolTip("Hide overlay")
+        self.close_button = QPushButton("✕")
+        self.close_button.setToolTip("Hide overlay (Esc)")
+        self.close_button.setStyleSheet("font-weight: 700;")
         self.close_button.clicked.connect(self.hide)
         header_layout.addWidget(self.close_button)
         layout.addWidget(self.header)
@@ -262,6 +264,20 @@ class LiveOverlay(QWidget):
         self.question_input.clear()
         self._begin_question(question)
         self.question_submitted.emit(question)
+
+    def keyPressEvent(self, event) -> None:
+        if event is not None and event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         event.ignore()

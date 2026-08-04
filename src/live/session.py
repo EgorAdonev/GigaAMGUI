@@ -7,11 +7,13 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from time import monotonic
 from typing import Protocol
 
 from src.core.asr.types import normalize_window_audio
 
 from .capture.base import CaptureAdapter
+from .diagnostics import SessionLog
 from .diarization import LIVE_ESTIMATE_STABILIZATION_HORIZON_SECONDS, label_event
 from .exports import ExportSelection, export_session
 from .journal import ConversationJournal, EventJournal, LiveSessionStore
@@ -56,6 +58,12 @@ SchedulerFactory = Callable[
 
 MAX_MIX_SKEW_NS = 1_000_000_000
 MAX_PENDING_MIX_CHUNKS = 100
+CHECKPOINT_INTERVAL_SECONDS = 2.0
+# How long a source that has already produced audio may stay quiet before the
+# mixer stops waiting for it, and how long to wait for a source that has never
+# produced anything at all (an idle WASAPI loopback endpoint, typically).
+MIX_SOURCE_IDLE_SECONDS = 0.5
+MIX_SOURCE_STARTUP_GRACE_SECONDS = 1.0
 
 
 class LiveSession:
@@ -72,6 +80,7 @@ class LiveSession:
         recorder_factory: Callable[[Path, bool | set[CaptureSource], bool], SessionRecorder] = SessionRecorder,
         diarization_factory: Callable[[str], object] | None = None,
         translate: Callable[[str, str], str] | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self._settings = settings
         self._adapters = dict(adapters)
@@ -84,6 +93,8 @@ class LiveSession:
         self._diarization_factory = diarization_factory
         self._translate = translate or (lambda _ru, en: en)
         self._session_dir = LiveSessionStore(root_dir).create(settings)
+        self._log_sink = log
+        self._session_log = SessionLog(self._session_dir / "live.log")
         self._journal = EventJournal(self._session_dir / "events.jsonl")
         self._conversation_journal = ConversationJournal(self._session_dir / "conversation.jsonl")
         self._recorder = recorder_factory(
@@ -104,6 +115,10 @@ class LiveSession:
         self._timelines: dict[CaptureSource, SourceTimeline] = {}
         self._mix_inputs: dict[CaptureSource, list[PcmChunk]] = {}
         self._mix_timestamp_origins: dict[CaptureSource, int] = {}
+        self._mix_last_input_at: dict[CaptureSource, float] = {}
+        self._mix_stalled_sources: set[CaptureSource] = set()
+        self._reported_mix_stalls: set[CaptureSource] = set()
+        self._mix_started_at = float("inf")
         self._mix_session_origin_ns: int | None = None
         self._mixer = AlignedMixer(max_skew_seconds=MAX_MIX_SKEW_NS / 1_000_000_000)
         self._last_mix_error_ns: int | None = None
@@ -117,13 +132,31 @@ class LiveSession:
         self._conversation: list[ConversationTurn] = []
         self._conversation_frozen = False
         self._subscribers: list[Callable[[TranscriptEvent | CaptureEvent | LiveStatus], None]] = []
+        self._reported_recording_failures: set[str] = set()
+        self._last_checkpoint_at = float("-inf")
         self._lock = RLock()
+
+    @property
+    def session_dir(self) -> Path:
+        return self._session_dir
+
+    def log(self, message: str) -> None:
+        """Record a live-path diagnostic to the session log and the UI sink."""
+        self._session_log.write(message)
+        if self._log_sink is None:
+            return
+        try:
+            self._log_sink(message)
+        except Exception:
+            self._log_sink = None
 
     def start(self) -> None:
         with self._lock:
             if self._state is not CaptureState.IDLE:
                 raise RuntimeError("session has already started")
+            self.log(f"session start: dir={self._session_dir} sources={sorted(s.value for s in self._adapters)}")
             self._state = CaptureState.STARTING
+            self._mix_started_at = monotonic()
             for source, adapter in self._adapters.items():
                 self._schedulers[source] = self._scheduler_factory(
                     source,
@@ -164,11 +197,20 @@ class LiveSession:
             if self._state in {CaptureState.STOPPED, CaptureState.IDLE}:
                 raise RuntimeError("session is not running")
             self._state = CaptureState.STOPPING
-            for source in self._active_sources:
-                self._adapters[source].stop()
-            for scheduler in self._schedulers.values():
-                scheduler.flush()
-                scheduler.close()
+            adapters = [self._adapters[source] for source in self._active_sources]
+            schedulers = list(self._schedulers.values())
+        # Draining happens outside the lock: the ASR workers publish finals
+        # through _on_final, which needs the same lock, and exports must not
+        # run until the last decode has landed in the journal.
+        self._notify_status()
+        for adapter in adapters:
+            adapter.stop()
+        self.log(f"draining {len(schedulers)} asr scheduler(s) before export")
+        for scheduler in schedulers:
+            scheduler.flush()
+        for scheduler in schedulers:
+            scheduler.close()
+        with self._lock:
             self._flush_mix_inputs()
             recordings = self._recorder.close()
             artifacts = getattr(self._recorder, "artifacts", None)
@@ -252,18 +294,20 @@ class LiveSession:
                 SourceTimeline(chunk.source, chunk.sample_rate, chunk.channels, self._on_event),
             )
             for aligned in timeline.ingest(chunk):
-                self._recorder.write(aligned)
+                # Recording is best-effort: losing the FLAC track must not cost
+                # us the recognition stream that the user actually came for.
+                try:
+                    self._recorder.write(aligned)
+                except Exception as exc:
+                    self._report_recording_failure(aligned, exc)
                 if self._mix_recording_enabled:
                     pending = self._mix_inputs.setdefault(aligned.source, [])
                     pending.append(self._normalize_mix_timestamp(aligned))
+                    self._mix_last_input_at[aligned.source] = monotonic()
+                    self._mix_stalled_sources.discard(aligned.source)
                     if len(pending) > MAX_PENDING_MIX_CHUNKS:
-                        self._disable_mix_recording(
-                            aligned.source,
-                            aligned.timestamp_ns,
-                            "pending input frame limit exceeded",
-                        )
-                    else:
-                        self._write_ready_mixes()
+                        self._mark_stalled_mix_peers(aligned)
+                    self._write_ready_mixes()
                 audio = normalize_window_audio(aligned.frames[:, 0], aligned.sample_rate, self._settings.asr_sample_rate)
                 offset = round(aligned.sample_offset * self._settings.asr_sample_rate / aligned.sample_rate)
                 self._schedulers[aligned.source].submit(
@@ -276,10 +320,21 @@ class LiveSession:
                         aligned.timestamp_ns,
                     )
                 )
+            self._write_checkpoint_if_due()
+
+    def _write_checkpoint_if_due(self) -> None:
+        """Checkpointing every chunk meant ~50 disk writes/s per source."""
+        now = monotonic()
+        if now - self._last_checkpoint_at < CHECKPOINT_INTERVAL_SECONDS:
+            return
+        self._last_checkpoint_at = now
+        try:
             LiveSessionStore(self._session_dir.parent).write_checkpoint(
                 self._session_dir,
                 {"active_sources": sorted(source.value for source in self._active_sources)},
             )
+        except Exception as exc:
+            self.log(f"checkpoint write failed: {type(exc).__name__}: {exc}")
 
     def _normalize_mix_timestamp(self, chunk: PcmChunk) -> PcmChunk:
         if self._mix_session_origin_ns is None:
@@ -290,11 +345,61 @@ class LiveSession:
             timestamp_ns=self._mix_session_origin_ns + chunk.timestamp_ns - source_origin_ns,
         )
 
+    def _mix_participants(self) -> set[CaptureSource]:
+        """Sources the mixer should still wait for before writing a block.
+
+        A source that never starts (an idle loopback endpoint) or that has gone
+        quiet must not hold the mix track hostage — that starvation is what
+        used to disable mixed recording seconds after the session began.
+        """
+        now = monotonic()
+        participants: set[CaptureSource] = set()
+        for source in self._active_sources:
+            if source in self._mix_stalled_sources:
+                continue
+            last_input_at = self._mix_last_input_at.get(source)
+            if last_input_at is None:
+                if now - self._mix_started_at <= MIX_SOURCE_STARTUP_GRACE_SECONDS:
+                    participants.add(source)
+                continue
+            if now - last_input_at <= MIX_SOURCE_IDLE_SECONDS:
+                participants.add(source)
+        return participants
+
+    def _mark_stalled_mix_peers(self, chunk: PcmChunk) -> None:
+        stalled = {
+            source for source in self._active_sources
+            if source is not chunk.source and not self._mix_inputs.get(source)
+        }
+        if not stalled:
+            return
+        self._mix_stalled_sources |= stalled
+        for source in sorted(stalled, key=lambda item: item.value):
+            self.log(f"mix peer stalled [{source.value}]: no audio delivered; mixing without it")
+            if source in self._reported_mix_stalls:
+                continue
+            self._reported_mix_stalls.add(source)
+            self._notify(CaptureEvent(
+                CaptureEventKind.STATUS,
+                source,
+                chunk.sample_offset,
+                chunk.timestamp_ns,
+                self._translate(
+                    f"Источник «{source.value}» не отдаёт звук — проверьте выбранное устройство. "
+                    "Общая дорожка записывается без него.",
+                    f"Source '{source.value}' is not delivering audio — check the selected device. "
+                    "The combined track continues without it.",
+                ),
+            ))
+
     def _write_ready_mixes(self) -> None:
         if not self._mix_recording_enabled:
             return
-        while self._active_sources and all(self._mix_inputs.get(source) for source in self._active_sources):
-            heads = {source: self._mix_inputs[source][0] for source in self._active_sources}
+        while True:
+            participants = self._mix_participants()
+            if not participants or not all(self._mix_inputs.get(source) for source in participants):
+                return
+            heads = {source: self._mix_inputs[source][0] for source in participants}
             earliest = min(heads.values(), key=lambda chunk: chunk.timestamp_ns)
             latest_timestamp_ns = max(chunk.timestamp_ns for chunk in heads.values())
             if latest_timestamp_ns - earliest.timestamp_ns > MAX_MIX_SKEW_NS:
@@ -304,7 +409,7 @@ class LiveSession:
                     "timestamp skew exceeds 1.000s",
                 )
                 return
-            inputs = {source: self._mix_inputs[source].pop(0) for source in self._active_sources}
+            inputs = {source: self._mix_inputs[source].pop(0) for source in participants}
             self._write_mix(inputs)
 
     def _flush_mix_inputs(self) -> None:
@@ -328,6 +433,7 @@ class LiveSession:
             return
         self._mix_recording_enabled = False
         self._mix_inputs.clear()
+        self.log(f"mix recording disabled [{source.value}]: {reason}")
         detail = self._translate(
             "Запись смешанного аудио отключена для этой сессии: "
             f"{reason}. Раздельная запись микрофона и системы, а также распознавание продолжаются.",
@@ -343,8 +449,26 @@ class LiveSession:
             source = next(iter(chunks))
             self._notify(CaptureEvent(CaptureEventKind.STATUS, source, 0, timestamp_ns, detail))
 
+    def _report_recording_failure(self, chunk: PcmChunk, exc: Exception) -> None:
+        detail = f"{type(exc).__name__}: {exc}"
+        self.log(f"recording write failed [{chunk.source.value}]: {detail}")
+        if detail in self._reported_recording_failures:
+            return
+        self._reported_recording_failures.add(detail)
+        self._notify(CaptureEvent(
+            CaptureEventKind.STATUS,
+            chunk.source,
+            chunk.sample_offset,
+            chunk.timestamp_ns,
+            self._translate(
+                f"Запись аудио источника прервана: {detail}. Распознавание продолжается.",
+                f"Source audio recording failed: {detail}. Recognition continues.",
+            ),
+        ))
+
     def _on_event(self, event: CaptureEvent) -> None:
         with self._lock:
+            self.log(f"capture event [{event.source.value}/{event.kind.value}]: {event.detail}")
             if event.kind in {CaptureEventKind.PERMISSION_DENIED, CaptureEventKind.DEVICE_REMOVED, CaptureEventKind.DISK_FULL}:
                 self._mark_failed(event.source, event.detail)
             self._notify(event)
@@ -504,9 +628,11 @@ class LiveSession:
         ))
 
     def _on_asr_error(self, source: CaptureSource, error: Exception) -> None:
+        self.log(f"asr error [{source.value}]: {type(error).__name__}: {error}")
         self._notify(CaptureEvent(CaptureEventKind.STATUS, source, 0, 0, str(error)))
 
     def _mark_failed(self, source: CaptureSource, detail: str) -> None:
+        self.log(f"source failed [{source.value}]: {detail}")
         self._active_sources.discard(source)
         self._failed_sources.add(source)
         if not self._active_sources and self._state is not CaptureState.STARTING:

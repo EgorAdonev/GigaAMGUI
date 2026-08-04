@@ -34,7 +34,6 @@ class _SpeechRun:
     silence_samples: int = 0
     last_partial_end: int | None = None
     voiced_samples: int = 0
-    partial_scheduled: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,7 +46,6 @@ class _Job:
     is_final: bool
     paragraph_break_after: bool
     voiced_samples: int
-    partial_scheduled: bool
 
 
 @dataclass
@@ -145,7 +143,6 @@ class LiveAsrScheduler:
                 if self._should_refresh_partial(run, chunk.sample_rate):
                     self._partial_job = self._job(chunk.source, run, is_final=False)
                     run.last_partial_end = run.end
-                    run.partial_scheduled = True
                     self._condition.notify()
             elif run is not None:
                 run.audio.append(audio.copy())
@@ -171,12 +168,22 @@ class LiveAsrScheduler:
         with self._condition:
             self._refresh_seconds = min(1.5, max(0.25, seconds))
 
-    def close(self) -> None:
+    def close(self, timeout: float | None = None) -> None:
+        """Drain queued decodes; `timeout` bounds the wait, `None` waits fully.
+
+        Abandoning the queue here used to drop every final that had not been
+        decoded within a second, which silently emptied short sessions.
+        """
         self.flush()
         with self._condition:
             self._closed = True
             self._condition.notify_all()
-        self._worker.join(timeout=1)
+        self._worker.join(timeout=timeout)
+
+    @property
+    def pending_jobs(self) -> int:
+        with self._condition:
+            return len(self._final_jobs) + (0 if self._partial_job is None else 1)
 
     def _should_refresh_partial(self, run: _SpeechRun, sample_rate: int) -> bool:
         if run.end - run.start < self._partial_minimum_seconds * sample_rate:
@@ -210,7 +217,6 @@ class LiveAsrScheduler:
             is_final,
             paragraph_break_after,
             run.voiced_samples,
-            run.partial_scheduled,
         )
 
     def _run(self) -> None:
@@ -245,11 +251,9 @@ class LiveAsrScheduler:
             return
         if not self._has_acceptable_confidence(segments):
             return
-        if job.is_final and (
-            job.voiced_samples < 16_000
-            or not job.partial_scheduled
-            or len(text.split()) < 2
-        ):
+        # A phrase shorter than the partial cadence never schedules a partial,
+        # so requiring one here dropped every brief utterance outright.
+        if job.is_final and (job.voiced_samples < 16_000 or len(text.split()) < 2):
             return
         event_id = f"{job.source.value}-{job.event_start}"
         if not job.is_final:
