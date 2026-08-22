@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import MEDIA_EXTENSIONS, save_env_value
+from ..utils.output_naming import find_result_file
 
 
 class FilesMixin:
@@ -205,6 +206,35 @@ class FilesMixin:
     # Файлы / папки
     # ──────────────────────────────────────────────────────────────
 
+    def _is_audio_already_transcribed(self, path: str) -> bool:
+        """Есть ли уже результат хотя бы в одном из включённых форматов вывода."""
+        if not self.output_dir or not os.path.isdir(self.output_dir):
+            return False
+        enabled_formats = self._get_selected_formats()
+        if not enabled_formats:
+            return False
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return any(find_result_file(self.output_dir, stem, fmt) for fmt in enabled_formats)
+
+    def _rebuild_pending_audio_files(self):
+        """При старте пересобрать очередь из input_dir, а не из сохранённого списка путей.
+
+        Показывает только файлы без готового результата — папка могла пополниться
+        новыми записями между запусками, а старые уже обработанные не нужно повторять.
+        """
+        folder = self.input_dir
+        if not folder or not os.path.isdir(folder):
+            self.files_to_process = []
+            return
+        candidates = sorted(
+            os.path.join(folder, name)
+            for name in os.listdir(folder)
+            if name.lower().endswith(MEDIA_EXTENSIONS)
+        )
+        self.files_to_process = [
+            path for path in candidates if not self._is_audio_already_transcribed(path)
+        ]
+
     def open_paths_from_system(self, paths: list, append: bool = True):
         """Open files received from Finder, Dock, CLI args, or another app instance."""
         media_files, transcript_files = self._collect_supported_open_paths(paths)
@@ -221,7 +251,6 @@ class FilesMixin:
             folder = os.path.dirname(transcript_files[0])
             self.llm_transcript_dir = folder
             self.user_settings.set_value("llm_transcript_dir", folder)
-            self.user_settings.set_value("last_selected_transcript_files", self.transcript_files_for_llm)
             self._refresh_llm_files_list()
             self.lbl_llm_status.setText(self._t("Транскрипты готовы к LLM-обработке", "Transcripts are ready for LLM processing"))
         if not media_files and not transcript_files and paths:
@@ -300,7 +329,6 @@ class FilesMixin:
             self.input_dir = file_dir
             self.user_settings.set_last_files_dir(file_dir)
         self._refresh_files_list()
-        self.user_settings.set_value("last_selected_audio_files", [p for p in self.files_to_process if os.path.isfile(p)])
         self.log(f"Добавлено в очередь: {len(unique_files)} файлов")
         for f in unique_files:
             self.log(f" + {os.path.basename(f)}")
@@ -344,7 +372,6 @@ class FilesMixin:
             if files:
                 self.files_to_process = files
                 self._refresh_files_list()
-                self.user_settings.set_value("last_selected_audio_files", [p for p in self.files_to_process if os.path.isfile(p)])
                 self.log(f"Добавлено из папки (включая подпапки): {len(files)} файлов")
                 for f in files:
                     self.log(f" + {os.path.relpath(f, folder)}")

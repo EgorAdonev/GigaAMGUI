@@ -277,6 +277,42 @@ class LlmMixin:
         except Exception as e:
             QMessageBox.warning(self, self._t("Ошибка", "Error"), self._t("Не удалось экспортировать результат: ", "Failed to export the result: ") + str(e))
 
+    def _is_transcript_already_processed(self, path: str) -> bool:
+        """Есть ли уже LLM-результат для этого транскрипта во включённых режиме+формате."""
+        target_dir = self.llm_output_dir or os.path.dirname(path)
+        if not target_dir or not os.path.isdir(target_dir):
+            return False
+        modes = [key for key, cb in self.llm_action_checkboxes.items() if cb.isChecked()]
+        export_formats = [key for key, cb in self.llm_export_checkboxes.items() if cb.isChecked()]
+        if not modes or not export_formats:
+            return False
+        stem = Path(path).stem
+        return any(
+            os.path.isfile(os.path.join(target_dir, f"{stem}_llm_{mode}.{fmt}"))
+            for mode in modes
+            for fmt in export_formats
+        )
+
+    def _rebuild_pending_llm_transcripts(self):
+        """При старте пересобрать список транскриптов из llm_transcript_dir.
+
+        Показывает только транскрипты без готового LLM-результата — файлы, которые
+        уже обработаны выбранными действиями/форматами, пропускаются.
+        """
+        folder = self.llm_transcript_dir
+        if not folder or not os.path.isdir(folder):
+            self.transcript_files_for_llm = []
+            return
+        transcript_exts = (".txt", ".md", ".srt", ".vtt")
+        candidates = sorted(
+            os.path.join(folder, name)
+            for name in os.listdir(folder)
+            if name.lower().endswith(transcript_exts) and "_llm_" not in name
+        )
+        self.transcript_files_for_llm = [
+            path for path in candidates if not self._is_transcript_already_processed(path)
+        ]
+
     def _refresh_llm_files_list(self):
         if not hasattr(self, "llm_files_list"):
             return
@@ -321,14 +357,12 @@ class LlmMixin:
             return
         self.transcript_files_for_llm = [p for p in self.transcript_files_for_llm if p not in selected]
         self._refresh_llm_files_list()
-        self.user_settings.set_value("last_selected_transcript_files", [p for p in self.transcript_files_for_llm if os.path.isfile(p)])
 
     def _clear_llm_files_list(self):
         if self.is_llm_processing or not self.transcript_files_for_llm:
             return
         self.transcript_files_for_llm = []
         self._refresh_llm_files_list()
-        self.user_settings.set_value("last_selected_transcript_files", [])
 
     def _select_llm_transcript_files(self):
         initial_dir = self.user_settings.get_value("llm_transcript_dir", self.llm_transcript_dir)
@@ -346,7 +380,6 @@ class LlmMixin:
                 self.llm_output_dir = folder
                 self._update_llm_output_dir_label(folder)
             self.user_settings.set_value("llm_transcript_dir", folder)
-            self.user_settings.set_value("last_selected_transcript_files", files)
             self._refresh_llm_files_list()
             self.lbl_llm_status.setText(self._t("Транскрипты готовы к LLM-обработке", "Transcripts are ready for LLM processing"))
 
@@ -379,7 +412,6 @@ class LlmMixin:
         self.txt_llm_transcript.clear()
         self._refresh_llm_files_list()
         self._clear_llm_result()
-        self.user_settings.set_value("last_selected_transcript_files", [])
         self.user_settings.set_value("llm_manual_transcript", "")
 
     def _selected_llm_modes(self):

@@ -202,8 +202,7 @@ class SettingsMixin:
         if 0 <= tab_index < self.tabs.count():
             self.tabs.setCurrentIndex(tab_index)
 
-        saved_audio_files = self.user_settings.get_value("last_selected_audio_files", []) or []
-        self.files_to_process = [path for path in saved_audio_files if os.path.isfile(path)]
+        self._rebuild_pending_audio_files()
         if self.files_to_process:
             self._refresh_files_list()
 
@@ -236,8 +235,7 @@ class SettingsMixin:
             except ValueError:
                 self.model_loader.configure_onnx_runtime(provider="auto")
 
-        saved_llm_files = self.user_settings.get_value("last_selected_transcript_files", []) or []
-        self.transcript_files_for_llm = [path for path in saved_llm_files if os.path.isfile(path)]
+        self._rebuild_pending_llm_transcripts()
         self._refresh_llm_files_list()
 
     def _save_ui_settings(self):
@@ -288,8 +286,6 @@ class SettingsMixin:
         self.user_settings.set_value("active_tab_index", self.tabs.currentIndex())
         self.user_settings.set_value("llm_actions", {k: cb.isChecked() for k, cb in self.llm_action_checkboxes.items()})
         self.user_settings.set_value("llm_export_formats", {k: cb.isChecked() for k, cb in self.llm_export_checkboxes.items()})
-        self.user_settings.set_value("last_selected_audio_files", [p for p in self.files_to_process if os.path.isfile(p)])
-        self.user_settings.set_value("last_selected_transcript_files", [p for p in self.transcript_files_for_llm if os.path.isfile(p)])
         if self.llm_output_dir:
             self.user_settings.set_value("llm_output_dir", self.llm_output_dir)
         if self.llm_transcript_dir:

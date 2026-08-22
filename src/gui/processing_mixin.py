@@ -481,7 +481,6 @@ class ProcessingMixin:
         generated_files = [p for p in self._last_generated_transcript_files if os.path.isfile(p)]
         if generated_files:
             self.transcript_files_for_llm = generated_files
-            self.user_settings.set_value("last_selected_transcript_files", generated_files)
             self.llm_transcript_dir = os.path.dirname(generated_files[0])
             if not self.llm_output_dir:
                 self.llm_output_dir = self.llm_transcript_dir
