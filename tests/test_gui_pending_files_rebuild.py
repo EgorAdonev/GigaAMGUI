@@ -99,3 +99,39 @@ def test_rebuild_pending_llm_transcripts_ignores_llm_output_files(tmp_path, wind
     window._rebuild_pending_llm_transcripts()
 
     assert window.transcript_files_for_llm == [str(transcript_dir / "note.txt")]
+
+
+def test_clearing_files_list_forgets_input_dir_so_restart_stays_empty(tmp_path, window):
+    input_dir = tmp_path / "audio"
+    input_dir.mkdir()
+    (input_dir / "a.wav").write_bytes(b"")
+
+    window.input_dir = str(input_dir)
+    window.files_to_process = [str(input_dir / "a.wav")]
+
+    window._clear_files_list()
+
+    assert window.files_to_process == []
+    assert window.input_dir == ""
+    assert window.user_settings.get_last_files_dir() is None
+
+    # Simulate a restart: rebuilding must not resurrect files from the old folder.
+    window._rebuild_pending_audio_files()
+    assert window.files_to_process == []
+
+
+def test_clearing_llm_files_list_forgets_transcript_dir_so_restart_stays_empty(tmp_path, window):
+    transcript_dir = tmp_path / "transcripts"
+    transcript_dir.mkdir()
+    (transcript_dir / "note.txt").write_text("text")
+
+    window.llm_transcript_dir = str(transcript_dir)
+    window.transcript_files_for_llm = [str(transcript_dir / "note.txt")]
+
+    window._clear_llm_files_list()
+
+    assert window.transcript_files_for_llm == []
+    assert window.user_settings.get_value("llm_transcript_dir", "") == ""
+
+    window._rebuild_pending_llm_transcripts()
+    assert window.transcript_files_for_llm == []

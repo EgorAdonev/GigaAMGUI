@@ -74,8 +74,18 @@ class FilesMixin:
         if self.is_processing or not self.files_to_process:
             return
         self.files_to_process = []
+        self._forget_input_dir()
         self._refresh_files_list()
         self.log("Очередь файлов очищена")
+
+    def _forget_input_dir(self):
+        """Забыть папку источника, чтобы её не пересканировали на следующем старте."""
+        self.input_dir = ""
+        self.user_settings.set_value("last_files_dir", "")
+        self.lbl_input_folder.setText(self._t("Папка не выбрана", "Folder not selected"))
+        self.lbl_input_folder.setStyleSheet(
+            self._transparent_label_style(self._colors()["text_mute"], font_pt=9)
+        )
 
     def keyPressEvent(self, event):
         if (

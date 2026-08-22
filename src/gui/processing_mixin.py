@@ -45,7 +45,6 @@ class ProcessingMixin:
             self._set_processing_controls_enabled(True)
         self.files_to_process = []
         self.output_dir = ""
-        self.input_dir = ""
         self.files_processed = 0
         self.total_files = 0
         self.time_spent = 0
@@ -71,8 +70,7 @@ class ProcessingMixin:
         self.btn_open_result.setVisible(False)
         c = self._colors()
         self._refresh_files_list()
-        self.lbl_input_folder.setText(self._t("Папка не выбрана", "Folder not selected"))
-        self.lbl_input_folder.setStyleSheet(self._transparent_label_style(c["text_mute"], font_pt=9))
+        self._forget_input_dir()
         self.lbl_output_folder.setText(self._t("Папка не выбрана (по умолчанию - рядом с файлом)", "Folder not selected (default: next to the file)"))
         self.lbl_output_folder.setStyleSheet(self._transparent_label_style(c["text_mute"]))
         self.input_path.clear()

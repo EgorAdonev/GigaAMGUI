@@ -362,7 +362,13 @@ class LlmMixin:
         if self.is_llm_processing or not self.transcript_files_for_llm:
             return
         self.transcript_files_for_llm = []
+        self._forget_llm_transcript_dir()
         self._refresh_llm_files_list()
+
+    def _forget_llm_transcript_dir(self):
+        """Забыть папку транскриптов, чтобы её не пересканировали на следующем старте."""
+        self.llm_transcript_dir = ""
+        self.user_settings.set_value("llm_transcript_dir", "")
 
     def _select_llm_transcript_files(self):
         initial_dir = self.user_settings.get_value("llm_transcript_dir", self.llm_transcript_dir)
@@ -410,6 +416,7 @@ class LlmMixin:
             return
         self.transcript_files_for_llm = []
         self.txt_llm_transcript.clear()
+        self._forget_llm_transcript_dir()
         self._refresh_llm_files_list()
         self._clear_llm_result()
         self.user_settings.set_value("llm_manual_transcript", "")
