@@ -73,17 +73,10 @@ omegaconf==2.3.0
 onnx==1.19.1
 onnx-asr==0.12.0
 onnxruntime==1.23.2
-# OpenTelemetry 1.34.0 -> 1.44.0: обновление по результатам сканирования
-# зависимостей (1 high / 3 medium на exporter-otlp-proto-grpc). Пакеты не
-# импортируются кодом проекта напрямую, поэтому обновление безопасно.
-opentelemetry-api==1.44.0
-opentelemetry-exporter-otlp==1.44.0
-opentelemetry-exporter-otlp-proto-common==1.44.0
-opentelemetry-exporter-otlp-proto-grpc==1.44.0
-opentelemetry-exporter-otlp-proto-http==1.44.0
-opentelemetry-proto==1.44.0
-opentelemetry-sdk==1.44.0
-opentelemetry-semantic-conventions==0.65b0
+# OpenTelemetry-пакеты исключены: код проекта их не импортирует, зависимости
+# их не требуют, а сканер уязвимостей даёт ложные срабатывания на CPE-мэппинг
+# версий exporter-otlp-proto-grpc на grpc:grpc (см. CVE-2023-33953 и др.,
+# затрагивающие только gRPC <= 1.53.x; реальный grpcio в сборке — 1.76.0).
 optuna==4.6.0
 packaging==25.0
 pandas==2.3.3
